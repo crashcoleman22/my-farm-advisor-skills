@@ -40,7 +40,9 @@ DEFAULT_CDL_WINDOW_YEARS = 5
 
 
 def _cdl_coverage_label(*, conus: bool, state_fips: str | None = None) -> str:
-    return "CONUS" if conus else str(state_fips or "19").zfill(2)
+    # NASS hosts the lower-48 mosaic as CDL_<year>_48.tif; CDL_<year>_CONUS.tif
+    # returns 404. Keep the canonical runtime filename separate below.
+    return "48" if conus else str(state_fips or "19").zfill(2)
 
 
 def _cdl_raster_path(year: int, *, conus: bool, state_fips: str | None = None) -> Path:
