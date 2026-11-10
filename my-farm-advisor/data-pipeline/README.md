@@ -102,6 +102,8 @@ The installer creates and refreshes the runtime tree under:
 
 Generated outputs, manifests, reports, logs, and downloaded payloads belong under the runtime base, for example `${DATA_PIPELINE_DATA_ROOT}/data-pipeline/growers` and `${DATA_PIPELINE_DATA_ROOT}/data-pipeline/shared`. The committed checkout remains the source for installer scripts and baseline `src/` files, but runtime execution happens from the copied source.
 
+For one lightweight interactive HTML field map per grower — pipeline field polygons on an Esri World Imagery basemap, with click popups and a zoom-to-field list — see [`web-maps/README.md`](web-maps/README.md). It is an explicit grower-level command, not part of the default farm pipeline, and it writes `growers/<grower>/derived/reports/<grower>_fields_map.html`.
+
 Farm weather now uses NASA POWER's public S3 Zarr stores by default at actual field centroids. The default farm weather controls are `--weather-backend zarr`, `--weather-start-year 2021`, `--weather-end-year 2025`, and `--weather-time-standard lst`. The output path and CSV schema stay compatible with existing reports:
 
 ```text
