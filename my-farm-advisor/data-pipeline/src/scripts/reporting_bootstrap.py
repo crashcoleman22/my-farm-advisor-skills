@@ -387,6 +387,7 @@ def ensure_canonical_data_tree(
     grower.mkdir(parents=True, exist_ok=True)
     (grower / "manifests").mkdir(parents=True, exist_ok=True)
     (grower / "logs").mkdir(parents=True, exist_ok=True)
+    (grower / "derived" / "reports").mkdir(parents=True, exist_ok=True)
     _write_json(
         grower / "grower.json",
         {
