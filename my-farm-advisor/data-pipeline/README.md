@@ -129,6 +129,29 @@ cd "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/src"
 
 Use `--weather-backend api` only when explicitly debugging the legacy NASA POWER point API path for small field sets.
 
+After a farm pipeline run, build the static field-level EDA bundle (boundaries, growing-season weather, USDA CDL history, and one map). The analysis is read-only and writes to the shared runtime tree:
+
+```bash
+export DATA_PIPELINE_DATA_ROOT=/absolute/path/to/my-farm-advisor-runtime
+cd "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/src"
+"${DATA_PIPELINE_DATA_ROOT}/data-pipeline/.venv/bin/python" \
+  scripts/eda/eda_field_level.py \
+  --grower illinois-grower --grower iowa-grower --grower nebraska-grower \
+  --start-year 2021 --end-year 2025 \
+  --cdl-years 2021,2022,2023,2024,2025 \
+  --command all --seed 2026
+```
+
+That writes PNG/SVG figures, CSV tables, an audit, and `manifest.json` under `shared/eda/field-level/`. Generate the self-contained HTML report separately so the report step stays independent of the reusable analysis:
+
+```bash
+"${DATA_PIPELINE_DATA_ROOT}/data-pipeline/.venv/bin/python" \
+  scripts/reporting/generate_eda_report.py \
+  --eda-dir "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/shared/eda/field-level"
+```
+
+See [`../eda/eda-field-level/GUIDE.md`](../eda/eda-field-level/GUIDE.md) for flags, figure interpretation, and the output layout.
+
 Shared county weather for maturity-by-FIPS uses NASA POWER's public S3 Zarr stores by default instead of issuing one `power.larc.nasa.gov` point API request per county grid cell. This avoids API rate-limit failures for L2 geoadmin scopes while preserving the existing output path and schema:
 
 ```text

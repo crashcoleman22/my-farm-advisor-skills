@@ -1,0 +1,10 @@
+category,grower,farm,state,records,detail
+boundaries,illinois-grower,illinois-demo-farm,IL,10,acres=1521.2; median=76.2; min=23.0; max=422.8; invalid=0; overlap_pairs=0
+boundaries,iowa-grower,iowa-demo-farm,IA,10,acres=1363.1; median=146.9; min=36.4; max=305.1; invalid=0; overlap_pairs=0
+boundaries,nebraska-grower,nebraska-demo-farm,NE,10,acres=1836.9; median=126.8; min=34.8; max=639.5; invalid=0; overlap_pairs=0
+weather,illinois-grower,illinois-demo-farm,IL,18260,fields=10; days_per_field=1826..1826 of 1826; missing_T2M=0; missing_precip=0; distinct_power_centroids=10; range=2021-01-01..2025-12-31
+weather,iowa-grower,iowa-demo-farm,IA,18260,fields=10; days_per_field=1826..1826 of 1826; missing_T2M=0; missing_precip=0; distinct_power_centroids=10; range=2021-01-01..2025-12-31
+weather,nebraska-grower,nebraska-demo-farm,NE,18260,fields=10; days_per_field=1826..1826 of 1826; missing_T2M=0; missing_precip=0; distinct_power_centroids=10; range=2021-01-01..2025-12-31
+cdl,illinois-grower,illinois-demo-farm,IL,103,"fields=10; years=2021,2022,2023,2024,2025; pct_sum_min=88.2; pct_sum_max=100.0; missing_crop_name=0"
+cdl,iowa-grower,iowa-demo-farm,IA,107,"fields=10; years=2021,2022,2023,2024,2025; pct_sum_min=92.4; pct_sum_max=100.0; missing_crop_name=0"
+cdl,nebraska-grower,nebraska-demo-farm,NE,119,"fields=10; years=2021,2022,2023,2024,2025; pct_sum_min=84.4; pct_sum_max=100.0; missing_crop_name=0"

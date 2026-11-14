@@ -58,6 +58,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib import ticker
 from matplotlib.patches import Patch
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent
@@ -506,11 +507,22 @@ def run_boundaries(
         ax=axis,
     )
     axis.set_xscale("log")
+    area_values = metrics["area_acres"].dropna()
+    if not area_values.empty:
+        tick_candidates = [10, 20, 50, 100, 200, 500, 1000, 2000]
+        visible_ticks = [
+            tick
+            for tick in tick_candidates
+            if area_values.min() * 0.8 <= tick <= area_values.max() * 1.3
+        ]
+        axis.set_xticks(visible_ticks)
+        axis.xaxis.set_major_formatter(ticker.ScalarFormatter())
+        axis.xaxis.set_minor_formatter(ticker.NullFormatter())
     axis.set_xlabel("Field area (acres, log scale)")
     axis.set_ylabel("")
     axis.set_title(
         "A1  Field size distribution by grower state\n"
-        f"n={len(metrics)} fields, {args.start_year}-{args.end_year} boundary vintage"
+        f"n={len(metrics)} fields; current OSM boundary snapshot from the runtime root"
     )
     for state in ordered_states:
         subset = metrics.loc[metrics["state"] == state, "area_acres"]
@@ -550,7 +562,7 @@ def run_boundaries(
     left.set_xlabel("Polsby-Popper compactness (1 = circle)")
     left.set_ylabel("Cumulative share of fields")
     left.set_title("A2a  Shape compactness")
-    left.legend(fontsize=7.5, loc="lower right")
+    left.legend(fontsize=7.5, loc="upper left", framealpha=0.9)
     left.set_ylim(0, 1.02)
 
     shape_order = ["pivot-like", "rectangular", "irregular"]
@@ -641,6 +653,17 @@ def run_boundaries(
     outputs.table("boundary_correlations.csv", correlations)
     axis.set_xscale("log")
     axis.set_yscale("log")
+    area_values = metrics["area_acres"].dropna()
+    if not area_values.empty:
+        tick_candidates = [10, 20, 50, 100, 200, 500, 1000, 2000]
+        visible_ticks = [
+            tick
+            for tick in tick_candidates
+            if area_values.min() * 0.8 <= tick <= area_values.max() * 1.3
+        ]
+        axis.set_xticks(visible_ticks)
+        axis.xaxis.set_major_formatter(ticker.ScalarFormatter())
+        axis.xaxis.set_minor_formatter(ticker.NullFormatter())
     axis.set_xlabel("Field area (acres, log scale)")
     axis.set_ylabel("Field perimeter (m, log scale)")
     axis.set_title(
@@ -702,7 +725,9 @@ def run_weather(
             axis.plot(group["year"], group["gs_precip_mm"], color=palette[state], alpha=0.28, lw=1.0)
         median = subset.groupby("year")["gs_precip_mm"].median()
         axis.plot(median.index, median.values, color="#111111", lw=2.2, marker="o", ms=3.5)
-        axis.set_title(state)
+        axis.set_title(
+            f"{state}  median {subset['gs_precip_mm'].median():.0f} mm"
+        )
         axis.set_xlabel("Year")
         axis.set_xticks(sorted(subset["year"].unique()))
         axis.tick_params(axis="x", rotation=45)
@@ -735,7 +760,8 @@ def run_weather(
             high = grouped.quantile(0.75)
             axis.plot(median.index, median.values, color=color, lw=1.4, label=str(year))
             axis.fill_between(median.index, low.values, high.values, color=color, alpha=0.14, lw=0)
-        axis.set_title(state)
+        season_totals = subset.groupby(["field_id", "year"])["cumulative_gdd"].max()
+        axis.set_title(f"{state}  median season total {season_totals.median():.0f} GDD")
         axis.set_xlabel("Day of year")
     axes[0].set_ylabel(f"Cumulative GDD (\u00b0C, base {GDD_BASE_C:.0f})")
     axes[-1].legend(fontsize=7, loc="lower right", title="Year")
@@ -791,24 +817,26 @@ def run_weather(
     figure, axis = plt.subplots(figsize=(7.0, 4.4))
     cross = pairs[~pairs["same_farm"]]
     within = pairs[pairs["same_farm"]]
-    axis.scatter(
-        cross["distance_km"],
-        cross["spearman_rho"],
-        s=16,
-        alpha=0.35,
-        color="#7f7f7f",
-        label="different farms",
-    )
-    axis.scatter(
-        within["distance_km"],
-        within["spearman_rho"],
-        s=30,
-        alpha=0.85,
-        color="#b23b3b",
-        edgecolor="white",
-        linewidth=0.5,
-        label="same farm",
-    )
+    if not cross.empty:
+        axis.scatter(
+            cross["distance_km"],
+            cross["spearman_rho"],
+            s=16,
+            alpha=0.35,
+            color="#7f7f7f",
+            label="different farms",
+        )
+    if not within.empty:
+        axis.scatter(
+            within["distance_km"],
+            within["spearman_rho"],
+            s=30,
+            alpha=0.85,
+            color="#b23b3b",
+            edgecolor="white",
+            linewidth=0.5,
+            label="same farm",
+        )
     if len(pairs) >= 10:
         bins = pd.cut(pairs["distance_km"], bins=min(10, max(4, len(pairs) // 30)))
         binned = pairs.groupby(bins, observed=True)["spearman_rho"].median()
@@ -820,14 +848,19 @@ def run_weather(
         axis.plot(centers, binned.values, color="#111111", lw=2.0, marker="o", ms=4, label="binned median")
     within_median = within["spearman_rho"].median() if not within.empty else float("nan")
     cross_median = cross["spearman_rho"].median() if not cross.empty else float("nan")
+    within_text = f"{within_median:.3f}" if np.isfinite(within_median) else "n/a"
+    cross_text = f"{cross_median:.3f}" if np.isfinite(cross_median) else "n/a"
     axis.set_xlabel("Distance between field centroids (km)")
     axis.set_ylabel("Spearman correlation of daily mean temperature")
-    axis.set_ylim(0.0, 1.02)
+    if not pairs.empty:
+        lowest = float(pairs["spearman_rho"].min())
+        axis.set_ylim(max(-1.0, min(0.98, lowest - 0.01)), 1.003)
     axis.set_title(
         "B3  Spatial coherence of weather\n"
-        f"same-farm median \u03c1={within_median:.3f}; other pairs median \u03c1={cross_median:.3f}"
+        f"same-farm median \u03c1={within_text}; other pairs median \u03c1={cross_text}"
     )
-    axis.legend(fontsize=8, loc="lower left")
+    if axis.get_legend_handles_labels()[0]:
+        axis.legend(fontsize=8, loc="lower left")
     figure.tight_layout()
     outputs.figure(figure, "fig06_weather_distance_decay")
     _log(args, f"weather: {len(seasonal)} field-years, {len(pairs)} field pairs")
@@ -887,7 +920,7 @@ def run_cdl(
             match = history[(history["field_id"] == field_id) & (history["year"] == year)]
             if not match.empty:
                 matrix[row_index, column_index] = crop_index.get(match.iloc[0]["dominant_crop"], 2)
-    figure, axis = plt.subplots(figsize=(5.2, 8.4))
+    figure, axis = plt.subplots(figsize=(5.6, max(4.8, 0.28 * len(field_order) + 1.5)))
     cmap = matplotlib.colors.ListedColormap([CROP_COLORS["Corn"], CROP_COLORS["Soybeans"], CROP_COLORS["Other"]])
     axis.imshow(matrix, aspect="auto", cmap=cmap, vmin=0, vmax=2)
     axis.set_xticks(range(len(years)))
@@ -899,8 +932,10 @@ def run_cdl(
             f"{state_by_field.get(field_id, '')} {str(field_id).split('-')[-1][-6:]}"
             for field_id in field_order
         ],
-        fontsize=6.5,
+        fontsize=6.5 if len(field_order) > 15 else 7.5,
     )
+    text_colors = ("#3b2a00", "#ffffff", "#1b1b1b")
+    text_size = 6.0 if len(field_order) > 15 else 7.0
     for row_index, field_id in enumerate(field_order):
         for column_index, year in enumerate(years):
             value = matrix[row_index, column_index]
@@ -911,8 +946,8 @@ def run_cdl(
                     ["C", "S", "O"][int(value)],
                     ha="center",
                     va="center",
-                    fontsize=7,
-                    color="white" if int(value) != 2 else "#222222",
+                    fontsize=text_size,
+                    color=text_colors[int(value)],
                 )
     state_boundaries: list[tuple[str, int]] = []
     current_state = None
@@ -925,10 +960,18 @@ def run_cdl(
         axis.axhline(index - 0.5, color="#111111", lw=1.2)
     axis.set_xlabel("CDL year")
     axis.set_title(
-        "C1  Dominant crop by field-year\nC = corn, S = soybeans, O = other"
+        "C1  Dominant crop by field-year\nC = corn, S = soybeans, O = other",
+        pad=30,
     )
     handles = [Patch(facecolor=color, label=label) for label, color in CROP_COLORS.items()]
-    axis.legend(handles=handles, fontsize=7.5, loc="upper center", ncol=3, bbox_to_anchor=(0.5, -0.06))
+    axis.legend(
+        handles=handles,
+        fontsize=7.5,
+        loc="lower center",
+        ncol=3,
+        bbox_to_anchor=(0.5, 1.0),
+        frameon=False,
+    )
     figure.tight_layout()
     outputs.figure(figure, "fig07_cdl_rotation_heatmap")
 
@@ -986,6 +1029,7 @@ def run_cdl(
             )
     left.set_xticks(range(len(ordered_states)))
     left.set_xticklabels(ordered_states)
+    left.set_xlim(-0.6, max(len(ordered_states) - 0.4, 0.6))
     left.set_ylabel("Area-weighted crop share (%)")
     left.set_ylim(0, 114)
     left.set_title("C2a  Crop mix by year (labels = 2-digit year)")
@@ -1099,14 +1143,31 @@ def run_map(
     mapped["dominant_crop"] = mapped["dominant_crop"].fillna("Other")
 
     ordered_states = [state for state in states if state in set(mapped["state"])]
-    figure, axes = plt.subplots(1, len(ordered_states), figsize=(5.0 * len(ordered_states), 5.2))
+    projected_frames: dict[str, gpd.GeoDataFrame] = {}
+    ratios: list[float] = []
+    for state in ordered_states:
+        subset = mapped[mapped["state"] == state].to_crs("EPSG:3857")
+        projected_frames[state] = subset
+        minx, miny, maxx, maxy = subset.total_bounds
+        width = max(float(maxx - minx), 1.0)
+        height = max(float(maxy - miny), 1.0)
+        ratios.append(float(np.clip(width / height, 0.55, 2.0)))
+    panel_height = 4.8
+    panel_widths = [panel_height * ratio for ratio in ratios]
+    figure, axes = plt.subplots(
+        1,
+        len(ordered_states),
+        figsize=(max(sum(panel_widths), 4.4), panel_height + 1.0),
+        gridspec_kw={"width_ratios": ratios},
+    )
     axes = np.atleast_1d(axes)
     try:
         import contextily as ctx
     except ImportError:
         ctx = None
+    basemap_used = False
     for axis, state in zip(axes, ordered_states):
-        subset = mapped[mapped["state"] == state].to_crs("EPSG:3857")
+        subset = projected_frames[state]
         subset.plot(
             ax=axis,
             color=[CROP_COLORS.get(crop, CROP_COLORS["Other"]) for crop in subset["dominant_crop"]],
@@ -1131,8 +1192,9 @@ def run_map(
                     axis,
                     source=ctx.providers.Esri.WorldImagery,
                     zoom="auto",
-                    attribution_size=5,
+                    attribution=False,
                 )
+                basemap_used = True
             except Exception as exc:  # network or tile failures must not fail the run
                 print(f"  warning: basemap unavailable for {state}: {exc}")
         minx, miny, maxx, maxy = subset.total_bounds
@@ -1147,6 +1209,16 @@ def run_map(
         axis.set_ylabel("")
     handles = [Patch(facecolor=color, edgecolor="#1b1b1b", label=label) for label, color in CROP_COLORS.items()]
     figure.legend(handles=handles, loc="lower center", ncol=3, fontsize=8, bbox_to_anchor=(0.5, -0.01))
+    if basemap_used:
+        figure.text(
+            0.995,
+            0.005,
+            "Basemap: Esri World Imagery",
+            ha="right",
+            va="bottom",
+            fontsize=5.5,
+            color="#555555",
+        )
     figure.suptitle(
         f"Field boundaries and {latest_year} CDL dominant crop\n"
         "labels are the last four digits of each field ID",
@@ -1177,6 +1249,22 @@ def _write_manifest(
         path = farm_boundary_path(row.grower, row.farm)
         if path.exists():
             inputs[str(path.relative_to(DATA_ROOT))] = _sha256(path)
+
+    farms: list[dict[str, object]] = []
+    for (grower, farm), group in fields.groupby(["grower", "farm"], dropna=False):
+        state_values = group["state"].dropna().astype(str)
+        county_values = group["county_name"].dropna().astype(str) if "county_name" in group else pd.Series(dtype=str)
+        farms.append(
+            {
+                "grower": str(grower),
+                "farm": str(farm),
+                "state": state_values.mode().iloc[0] if not state_values.empty else "",
+                "county": county_values.mode().iloc[0] if not county_values.empty else "",
+                "fields": int(group["field_id"].nunique()),
+                "acres": float(group.to_crs("EPSG:5070").geometry.area.sum() / 4046.8564224),
+            }
+        )
+
     manifest = {
         "analysis": "field-level-eda",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1186,6 +1274,7 @@ def _write_manifest(
         "cdl_years": [int(year) for year in sorted(cdl["year"].unique().tolist())] if not cdl.empty else [],
         "growers": sorted(str(grower) for grower in fields["grower"].unique().tolist()),
         "states": sorted(str(state) for state in fields["state"].unique().tolist()),
+        "farms": sorted(farms, key=lambda item: (str(item["state"]), str(item["farm"]))),
         "field_count": int(fields["field_id"].nunique()),
         "weather_rows": int(len(weather)),
         "cdl_rows": int(len(cdl)),
