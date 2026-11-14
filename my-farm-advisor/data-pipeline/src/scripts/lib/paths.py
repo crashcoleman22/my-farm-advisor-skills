@@ -460,6 +460,18 @@ def shared_cdl_logs_dir() -> Path:
     return shared_cdl_dir() / "logs"
 
 
+def shared_eda_dir() -> Path:
+    return SHARED_ROOT / "eda"
+
+
+def shared_eda_run_dir(run_slug: str = "field-level") -> Path:
+    return shared_eda_dir() / validate_path_slug(run_slug, "run_slug")
+
+
+def farm_eda_dir(grower_slug: str, farm_slug: str) -> Path:
+    return farm_derived_dir(grower_slug, farm_slug) / "eda"
+
+
 def shared_manifest_dir() -> Path:
     return SHARED_ROOT / "manifests"
 

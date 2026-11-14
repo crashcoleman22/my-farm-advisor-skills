@@ -28,10 +28,22 @@ ensure_runtime_environment()
 import geopandas as gpd
 import pandas as pd
 import requests
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from naming import field_slug_from_id
 from paths import DATA_ROOT, SCRIPTS_ROOT, farm_boundary_path, farm_manifest_dir, shared_geoadmin_counties_dir
+
+STATE_FIPS_TO_ABBR = {
+    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO",
+    "09": "CT", "10": "DE", "11": "DC", "12": "FL", "13": "GA", "15": "HI",
+    "16": "ID", "17": "IL", "18": "IN", "19": "IA", "20": "KS", "21": "KY",
+    "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
+    "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH",
+    "34": "NJ", "35": "NM", "36": "NY", "37": "NC", "38": "ND", "39": "OH",
+    "40": "OK", "41": "OR", "42": "PA", "44": "RI", "45": "SC", "46": "SD",
+    "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
+    "54": "WV", "55": "WI", "56": "WY",
+}
 
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
@@ -136,9 +148,11 @@ def _osm_elements_to_fields(
     state_fips: str,
     county_fips: str,
     county_name: str,
+    min_area_acres: float = 0.5,
 ) -> gpd.GeoDataFrame:
     records: list[dict] = []
     county_gdf = gpd.GeoDataFrame([{"geometry": county_geom}], crs="EPSG:4326")
+    state_abbr = STATE_FIPS_TO_ABBR.get(state_fips.zfill(2), "")
 
     for element in elements:
         if element.get("type") != "way":
@@ -171,6 +185,8 @@ def _osm_elements_to_fields(
                 "field_id": f"osm-{element.get('id')}",
                 "source": "OpenStreetMap/Overpass",
                 "crop_name": str(tags.get("crop") or tags.get("landuse", "Unknown")),
+                "country": "US",
+                "state": state_abbr,
                 "state_fips": state_fips.zfill(2),
                 "county_fips": county_fips.zfill(3),
                 "county_name": county_name,
@@ -186,18 +202,45 @@ def _osm_elements_to_fields(
     gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
     gdf = gdf.drop_duplicates(subset=["field_id"]).reset_index(drop=True)
     gdf["area_acres"] = gdf.to_crs("EPSG:5070").geometry.area / 4046.8564224
-    gdf = gdf[gdf["area_acres"] > 0.5].copy()
+    gdf = gdf[gdf["area_acres"] >= float(min_area_acres)].copy()
     return gdf
 
 
-def _sample_fields(gdf: gpd.GeoDataFrame, *, count: int, seed: int) -> gpd.GeoDataFrame:
+def _sample_fields(
+    gdf: gpd.GeoDataFrame,
+    *,
+    count: int,
+    seed: int,
+    exclude_ids: set[str] | None = None,
+    anchor_xy: tuple[float, float] | None = None,
+    radius_km: float = 0.0,
+) -> gpd.GeoDataFrame:
+    if gdf.empty or count <= 0:
+        return gdf.iloc[0:0].copy()
+    if exclude_ids:
+        gdf = gdf[~gdf["field_id"].astype(str).isin(exclude_ids)].copy()
     if gdf.empty:
         return gdf
     ranked = gdf.sort_values(["area_acres", "field_id"], ascending=[False, True]).reset_index(
         drop=True
     )
     if len(ranked) <= count:
-        return ranked
+        return ranked.sort_values("field_id").reset_index(drop=True)
+
+    if radius_km and radius_km > 0:
+        centroids = ranked.to_crs("EPSG:5070").geometry.centroid
+        if anchor_xy is None:
+            anchor_xy = (float(centroids.iloc[0].x), float(centroids.iloc[0].y))
+        anchor = Point(anchor_xy)
+        radius_m = float(radius_km) * 1000.0
+        for _ in range(8):
+            distance = centroids.distance(anchor)
+            subset = ranked[distance <= radius_m].copy()
+            if len(subset) >= count:
+                sampled = subset.sample(n=count, random_state=seed).copy()
+                return sampled.sort_values("field_id").reset_index(drop=True)
+            radius_m *= 1.5
+
     sampled = ranked.sample(n=count, random_state=seed).copy()
     return sampled.sort_values("field_id").reset_index(drop=True)
 
@@ -217,8 +260,9 @@ def _merge_with_existing(
     farm_slug: str,
     inventory_path: Path,
     new_fields: gpd.GeoDataFrame,
+    farm_boundary: Path | None = None,
 ) -> gpd.GeoDataFrame:
-    farm_boundary = farm_boundary_path(grower_slug, farm_slug)
+    farm_boundary = farm_boundary or farm_boundary_path(grower_slug, farm_slug)
     merged = new_fields.copy()
     if farm_boundary.exists():
         existing = gpd.read_file(farm_boundary)
@@ -296,6 +340,27 @@ def main() -> None:
         "--append", action="store_true", help="Append sampled fields to existing farm"
     )
     parser.add_argument(
+        "--min-area-acres",
+        type=float,
+        default=0.5,
+        help="Minimum sampled field area in acres. Defaults to 0.5.",
+    )
+    parser.add_argument(
+        "--cluster-radius-km",
+        type=float,
+        default=0.0,
+        help=(
+            "Sample fields within this radius of the farm anchor, expanding the "
+            "radius until enough candidates exist. 0 disables spatial clustering."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-lat", type=float, default=None, help="Optional cluster anchor latitude"
+    )
+    parser.add_argument(
+        "--anchor-lon", type=float, default=None, help="Optional cluster anchor longitude"
+    )
+    parser.add_argument(
         "--inventory-csv",
         default=None,
         help=(
@@ -330,10 +395,8 @@ def main() -> None:
         state_fips=args.state_fips,
         county_fips=county_fips,
         county_name=county_name,
+        min_area_acres=args.min_area_acres,
     )
-    sampled = _sample_fields(fields, count=args.count, seed=args.seed)
-    if sampled.empty:
-        raise RuntimeError("No eligible farmland polygons found for requested county")
 
     default_inventory = (
         farm_manifest_dir(args.grower_slug, args.farm_slug) / "field-inventory.csv"
@@ -349,6 +412,41 @@ def main() -> None:
     boundary_out = boundary_out if boundary_out.is_absolute() else _runtime_path(boundary_out)
     boundary_out.parent.mkdir(parents=True, exist_ok=True)
 
+    existing: gpd.GeoDataFrame | None = None
+    exclude_ids: set[str] = set()
+    anchor_xy: tuple[float, float] | None = None
+    if args.append and boundary_out.exists():
+        existing = gpd.read_file(boundary_out)
+        if not existing.empty:
+            exclude_ids = set(existing["field_id"].astype(str))
+            centroids = existing.to_crs("EPSG:5070").geometry.centroid
+            anchor_xy = (float(centroids.x.mean()), float(centroids.y.mean()))
+
+    if args.anchor_lat is not None and args.anchor_lon is not None:
+        anchor_point = (
+            gpd.GeoSeries([Point(args.anchor_lon, args.anchor_lat)], crs="EPSG:4326")
+            .to_crs("EPSG:5070")
+            .iloc[0]
+        )
+        anchor_xy = (float(anchor_point.x), float(anchor_point.y))
+
+    target_new = args.count
+    if args.append and existing is not None:
+        target_new = max(0, args.count - len(existing))
+
+    sampled = _sample_fields(
+        fields,
+        count=target_new,
+        seed=args.seed,
+        exclude_ids=exclude_ids,
+        anchor_xy=anchor_xy,
+        radius_km=args.cluster_radius_km,
+    )
+    if sampled.empty and not args.append:
+        raise RuntimeError(
+            "No eligible farmland polygons found for requested county"
+        )
+
     final_fields = sampled
     if args.append:
         final_fields = _merge_with_existing(
@@ -356,6 +454,7 @@ def main() -> None:
             farm_slug=args.farm_slug,
             inventory_path=inventory_path,
             new_fields=sampled,
+            farm_boundary=boundary_out,
         )
     else:
         _write_inventory(inventory_path, sampled)
@@ -372,6 +471,8 @@ def main() -> None:
         "sample_count": len(sampled),
         "final_field_count": len(final_fields),
         "seed": args.seed,
+        "min_area_acres": args.min_area_acres,
+        "cluster_radius_km": args.cluster_radius_km,
         "boundary_path": _runtime_relative(boundary_out),
         "inventory_csv": _runtime_relative(inventory_path),
         "append": bool(args.append),
