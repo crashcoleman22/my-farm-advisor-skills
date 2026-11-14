@@ -18,6 +18,7 @@ stay in the external runtime root because they are large generated outputs.
   - `cdl_rotation_summary.csv` - per-field rotation sequence and Shannon
     diversity.
   - `data_audit.csv` - input coverage and completeness checks.
+  - `walkthrough-script.md` - narration and screen plan for the video walkthrough.
   - `README.md` - provenance and regeneration notes for the bundle.
 
 ## Regenerating

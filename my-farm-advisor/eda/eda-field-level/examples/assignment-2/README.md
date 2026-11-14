@@ -21,6 +21,8 @@ weather, and USDA Cropland Data Layer (CDL) rasters for 2021-2025.
 - `cdl_rotation_summary.csv` - per-field crop sequence, changes, and Shannon
   diversity.
 - `data_audit.csv` - input coverage checks for boundaries, weather, and CDL.
+- `walkthrough-script.md` - the narration and screen-by-screen plan for the
+  2-5 minute video walkthrough.
 
 The full bundle lives in the runtime root, not in Git:
 `${DATA_PIPELINE_DATA_ROOT}/data-pipeline/shared/eda/field-level/` contains all
