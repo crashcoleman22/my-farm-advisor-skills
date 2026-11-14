@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import subprocess
 import sys
 import time
@@ -206,6 +207,22 @@ def _osm_elements_to_fields(
     return gdf
 
 
+def _pivot_like_mask(fields: gpd.GeoDataFrame) -> pd.Series:
+    """Boolean mask for round, pivot-shaped field outlines in an equal-area CRS."""
+    projected = fields.to_crs("EPSG:5070")
+    area = projected.geometry.area.astype(float)
+    perimeter = projected.geometry.length.astype(float)
+    compactness = 4.0 * math.pi * area / (perimeter**2)
+    rectangles = projected.geometry.apply(lambda geometry: geometry.minimum_rotated_rectangle)
+    rect_area = rectangles.area.astype(float)
+    rect_fill = area / rect_area
+    return (
+        (compactness >= 0.90)
+        & rect_fill.between(0.68, 0.87, inclusive="both")
+        & area.notna()
+    ).reindex(fields.index, fill_value=False)
+
+
 def _sample_fields(
     gdf: gpd.GeoDataFrame,
     *,
@@ -214,6 +231,7 @@ def _sample_fields(
     exclude_ids: set[str] | None = None,
     anchor_xy: tuple[float, float] | None = None,
     radius_km: float = 0.0,
+    pivot_quota: int = 0,
 ) -> gpd.GeoDataFrame:
     if gdf.empty or count <= 0:
         return gdf.iloc[0:0].copy()
@@ -224,8 +242,34 @@ def _sample_fields(
     ranked = gdf.sort_values(["area_acres", "field_id"], ascending=[False, True]).reset_index(
         drop=True
     )
+
+    def _select(subset: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        take_count = min(count, len(subset))
+        if take_count <= 0:
+            return subset.iloc[0:0]
+        if pivot_quota <= 0 or take_count == len(subset):
+            return subset.sample(n=take_count, random_state=seed).copy()
+        pivot_mask = _pivot_like_mask(subset)
+        pivots = subset[pivot_mask]
+        others = subset[~pivot_mask]
+        pivot_take = min(int(pivot_quota), len(pivots), take_count)
+        chosen_frames = []
+        if pivot_take > 0:
+            chosen_frames.append(pivots.sample(n=pivot_take, random_state=seed))
+        remaining = take_count - pivot_take
+        if remaining > 0 and len(others) > 0:
+            chosen_frames.append(
+                others.sample(n=min(remaining, len(others)), random_state=seed + 1)
+            )
+        chosen = pd.concat(chosen_frames) if chosen_frames else subset.iloc[0:0]
+        missing = take_count - len(chosen)
+        if missing > 0:
+            rest = subset.drop(index=chosen.index)
+            chosen = pd.concat([chosen, rest.sample(n=min(missing, len(rest)), random_state=seed + 2)])
+        return chosen
+
     if len(ranked) <= count:
-        return ranked.sort_values("field_id").reset_index(drop=True)
+        return _select(ranked).sort_values("field_id").reset_index(drop=True)
 
     if radius_km and radius_km > 0:
         centroids = ranked.to_crs("EPSG:5070").geometry.centroid
@@ -237,11 +281,11 @@ def _sample_fields(
             distance = centroids.distance(anchor)
             subset = ranked[distance <= radius_m].copy()
             if len(subset) >= count:
-                sampled = subset.sample(n=count, random_state=seed).copy()
+                sampled = _select(subset)
                 return sampled.sort_values("field_id").reset_index(drop=True)
             radius_m *= 1.5
 
-    sampled = ranked.sample(n=count, random_state=seed).copy()
+    sampled = _select(ranked)
     return sampled.sort_values("field_id").reset_index(drop=True)
 
 
@@ -269,6 +313,16 @@ def _merge_with_existing(
         merged = pd.concat([existing, new_fields], ignore_index=True)
         merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=new_fields.crs)
         merged = merged.drop_duplicates(subset=["field_id"], keep="last")
+        # Older boundaries can predate the administrative columns added by this
+        # bootstrap. Backfill them from the freshly sampled rows so the merged
+        # farm is uniform and state comparisons do not silently drop fields.
+        for column in ("country", "state", "state_fips", "county_fips", "county_name"):
+            if column not in merged.columns:
+                continue
+            reference = new_fields[column].dropna()
+            if reference.empty:
+                continue
+            merged[column] = merged[column].fillna(reference.iloc[0])
     merged = merged.sort_values("field_id").reset_index(drop=True)
 
     if inventory_path.exists():
@@ -361,6 +415,15 @@ def main() -> None:
         "--anchor-lon", type=float, default=None, help="Optional cluster anchor longitude"
     )
     parser.add_argument(
+        "--pivot-quota",
+        type=int,
+        default=0,
+        help=(
+            "Reserve up to this many sampled slots for round pivot-shaped fields. "
+            "0 disables the quota. Requires --cluster-radius-km for a tight cluster."
+        ),
+    )
+    parser.add_argument(
         "--inventory-csv",
         default=None,
         help=(
@@ -441,6 +504,7 @@ def main() -> None:
         exclude_ids=exclude_ids,
         anchor_xy=anchor_xy,
         radius_km=args.cluster_radius_km,
+        pivot_quota=args.pivot_quota,
     )
     if sampled.empty and not args.append:
         raise RuntimeError(
@@ -473,6 +537,7 @@ def main() -> None:
         "seed": args.seed,
         "min_area_acres": args.min_area_acres,
         "cluster_radius_km": args.cluster_radius_km,
+        "pivot_quota": args.pivot_quota,
         "boundary_path": _runtime_relative(boundary_out),
         "inventory_csv": _runtime_relative(inventory_path),
         "append": bool(args.append),
