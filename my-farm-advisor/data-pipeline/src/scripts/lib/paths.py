@@ -70,6 +70,14 @@ def grower_logs_dir(grower_slug: str) -> Path:
     return grower_dir(grower_slug) / "logs"
 
 
+def grower_derived_dir(grower_slug: str) -> Path:
+    return grower_dir(grower_slug) / "derived"
+
+
+def grower_reports_dir(grower_slug: str) -> Path:
+    return grower_derived_dir(grower_slug) / "reports"
+
+
 def farm_dir(grower_slug: str, farm_slug: str) -> Path:
     return ensure_data_root_path(
         grower_dir(grower_slug) / "farms" / validate_path_slug(farm_slug, "farm_slug")
@@ -450,6 +458,18 @@ def shared_cdl_manifest_dir() -> Path:
 
 def shared_cdl_logs_dir() -> Path:
     return shared_cdl_dir() / "logs"
+
+
+def shared_eda_dir() -> Path:
+    return SHARED_ROOT / "eda"
+
+
+def shared_eda_run_dir(run_slug: str = "field-level") -> Path:
+    return shared_eda_dir() / validate_path_slug(run_slug, "run_slug")
+
+
+def farm_eda_dir(grower_slug: str, farm_slug: str) -> Path:
+    return farm_derived_dir(grower_slug, farm_slug) / "eda"
 
 
 def shared_manifest_dir() -> Path:

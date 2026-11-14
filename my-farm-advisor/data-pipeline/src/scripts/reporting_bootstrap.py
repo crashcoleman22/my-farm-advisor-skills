@@ -164,6 +164,23 @@ def _write_text(path: Path, text: str, *, overwrite: bool = True) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _state_from_boundary(farm_dir: Path) -> str:
+    """Read the first non-empty state code from a farm boundary GeoJSON."""
+    boundary = farm_dir / "boundary" / "field_boundaries.geojson"
+    if not boundary.exists():
+        return ""
+    try:
+        payload = json.loads(boundary.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    for feature in payload.get("features", []):
+        properties = feature.get("properties") or {}
+        state = properties.get("state")
+        if isinstance(state, str) and state.strip():
+            return state.strip()
+    return ""
+
+
 def ensure_canonical_field_artifacts(
     field_slug: str, grower_slug: str = DEFAULT_GROWER, farm_slug: str = DEFAULT_FARM
 ) -> None:
@@ -387,6 +404,7 @@ def ensure_canonical_data_tree(
     grower.mkdir(parents=True, exist_ok=True)
     (grower / "manifests").mkdir(parents=True, exist_ok=True)
     (grower / "logs").mkdir(parents=True, exist_ok=True)
+    (grower / "derived" / "reports").mkdir(parents=True, exist_ok=True)
     _write_json(
         grower / "grower.json",
         {
@@ -406,18 +424,40 @@ def ensure_canonical_data_tree(
     (farm / "derived" / "summaries").mkdir(parents=True, exist_ok=True)
     (farm / "derived" / "dashboards").mkdir(parents=True, exist_ok=True)
     (farm / "derived" / "tables").mkdir(parents=True, exist_ok=True)
-    _write_json(
-        farm / "farm.json",
+    farm_metadata_path = farm / "farm.json"
+    existing_farm_metadata: dict = {}
+    if farm_metadata_path.exists():
+        try:
+            loaded = json.loads(farm_metadata_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing_farm_metadata = loaded
+        except (OSError, json.JSONDecodeError):
+            existing_farm_metadata = {}
+    # Keep provenance that earlier steps already wrote. The state code must come
+    # from the field boundaries so a shared pipeline helper cannot relabel a
+    # Nebraska or Illinois farm as Iowa.
+    incoming_name = str(farm_name or "").strip()
+    if incoming_name in ("", "Default Farm", farm_slug) and existing_farm_metadata.get(
+        "display_name"
+    ):
+        display_name = str(existing_farm_metadata["display_name"])
+    else:
+        display_name = incoming_name or farm_slug
+    farm_metadata = dict(existing_farm_metadata)
+    farm_metadata.update(
         {
             "grower_slug": grower_slug,
             "farm_slug": farm_slug,
-            "display_name": farm_name,
-            "state": "IA",
-            "country": "US",
-            "default_crs": "EPSG:4326",
-            "notes": "Canonical farm metadata",
-        },
+            "display_name": display_name,
+            "country": farm_metadata.get("country") or "US",
+            "default_crs": farm_metadata.get("default_crs") or "EPSG:4326",
+            "notes": farm_metadata.get("notes") or "Canonical farm metadata",
+        }
     )
+    state_code = _state_from_boundary(farm) or str(farm_metadata.get("state") or "")
+    if state_code:
+        farm_metadata["state"] = state_code
+    _write_json(farm_metadata_path, farm_metadata)
     _write_text(farm / "logs" / "pipeline_runs.jsonl", "", overwrite=False)
 
     slugs = field_slugs_from_inventory(inventory_path=inventory_path)
