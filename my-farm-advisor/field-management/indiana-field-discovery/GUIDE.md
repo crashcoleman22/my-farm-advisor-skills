@@ -14,6 +14,11 @@ metadata:
 
 _One county, one reproducible field database: boundaries, soils, crop history, NDVI._
 
+A completed, verified run is documented in
+[JOHNSON-COUNTY.md](JOHNSON-COUNTY.md): Johnson County, Indiana (FIPS 18081),
+3,787 fields, 101,617.5 acres, soils on every field, CDL 2021–2025, and six
+Sentinel-2 NDVI seasons. Use it as the reference output for a new county.
+
 ---
 
 ## What this workflow produces
@@ -160,6 +165,104 @@ python -m indiana_field_discovery ndvi-summary
 | Monthly NDVI | `derived/ndvi/field_ndvi_monthly.parquet` | field x year x month |
 | Annual NDVI | `derived/ndvi/field_ndvi_annual.parquet` | field x year |
 | NDVI trends | `derived/ndvi/field_ndvi_trends.parquet` | field |
+
+All tables share `field_id`, which is the original CSB id, so a field can be
+traced from boundary to soils to crop history to NDVI without a surrogate key.
+
+---
+
+## Selecting and retrieving individual fields
+
+Load the boundary table once and filter it. Every other table is keyed by the
+same `field_id`.
+
+```bash
+export INDIANA_RUNTIME_ROOT=/path/to/indiana-runtime
+export FARM="$INDIANA_RUNTIME_ROOT/data-pipeline/growers/<grower>/farms/<farm>"
+```
+
+```python
+import geopandas as gpd
+import pandas as pd
+
+fields = gpd.read_parquet(f"{FARM}/boundary/field_boundaries.parquet")
+
+# by CSB id
+fid = "181623000956756"
+one = fields[fields["field_id"] == fid]
+
+# by crop, class, or size
+corn = fields[(fields["crop_name"] == "Corn") & (fields["ag_class"] == "crop")]
+large = fields[fields["area_acres_clipped"] >= 40]
+
+# by point (transform the point into the field CRS first)
+from shapely.geometry import Point
+pt = gpd.GeoSeries([Point(-86.10, 39.55)], crs="EPSG:4326").to_crs(fields.crs)
+hit = fields[fields.intersects(pt.iloc[0])]
+
+# export one field
+one.to_file("/tmp/field.geojson", driver="GeoJSON")
+```
+
+`boundary/field_boundaries_ag.parquet` holds the `ag_class == "crop"` subset for
+workflows that should ignore non-crop land.
+
+Retrieve the attached records with the same id:
+
+```python
+soil   = pd.read_csv(f"{FARM}/manifests/field_soil_summary.csv", dtype={"field_id": str})
+units  = pd.read_csv(f"{FARM}/manifests/field_soil_map_units.csv", dtype={"field_id": str})
+crop   = pd.read_csv(f"{FARM}/manifests/field_crop_history.csv", dtype={"field_id": str})
+daily  = pd.read_parquet(f"{FARM}/derived/ndvi/field_ndvi_daily.parquet")
+annual = pd.read_parquet(f"{FARM}/derived/ndvi/field_ndvi_annual.parquet")
+
+soil[soil.field_id == fid]                     # topsoil properties + dominant map unit
+units[units.field_id == fid]                   # every touching map unit
+crop[crop.field_id == fid].sort_values("year") # annual crop rotation
+daily[(daily.field_id == fid) & (daily.year == 2025)].sort_values("date")
+annual[annual.field_id == fid]                 # peaks and season means
+```
+
+See [JOHNSON-COUNTY.md](JOHNSON-COUNTY.md#3-select-and-retrieve-a-single-field)
+for a complete worked example with real values.
+
+---
+
+## Adding another county
+
+The pipeline is county-parameterised; no code change is needed.
+
+1. Find the FIPS pair (`--state-fips`, `--county-fips`) and the SSURGO survey
+   area symbol (`--survey-area`, e.g. `IN081` for Johnson County). The area list
+   is available from Soil Data Access:
+
+   ```sql
+   SELECT areasymbol, areaname, saverest FROM sacatalog WHERE areasymbol LIKE 'IN%';
+   ```
+
+   A county covered by more than one survey area needs one `soils` run per area,
+   or an extension to the loader.
+
+2. Pick new `--grower` and `--farm` slugs so the new county writes to its own
+   directory and never overwrites an existing one.
+
+3. Run the stages in order, keeping the pilot gate and worker budget:
+
+   ```bash
+   python -m indiana_field_discovery county-fields --state-fips 18 --county-fips 063 --grower in-other --farm countywide
+   python -m indiana_field_discovery soils --survey-area IN063 --grower in-other --farm countywide
+   python -m indiana_field_discovery crop-history --grower in-other --farm countywide
+   python -m indiana_field_discovery ndvi --pilot-fields 10 --workers 2 --grower in-other --farm countywide
+   python -m indiana_field_discovery ndvi --workers 2 --grower in-other --farm countywide
+   python -m indiana_field_discovery ndvi-summary --grower in-other --farm countywide
+   ```
+
+4. Re-run the validation gates below and record the result in a county page like
+   [JOHNSON-COUNTY.md](JOHNSON-COUNTY.md).
+
+Non-Indiana counties only change the FIPS and survey-area values; the data
+sources are national. NDVI training/validation is not required because no model
+is fitted — only per-pixel index statistics are computed.
 
 ---
 
