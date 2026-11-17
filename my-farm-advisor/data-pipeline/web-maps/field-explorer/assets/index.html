@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<link rel="stylesheet" href="{{LEAFLET_CSS}}">
+<style>{{STYLE}}</style>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <h1>{{TITLE}}</h1>
+      <p id="subtitle"></p>
+    </div>
+    <div id="summary"></div>
+    <button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false">Fields</button>
+  </header>
+
+  <aside id="sidebar" aria-label="Layer controls and field list">
+    <section class="panel">
+      <h2>Layers</h2>
+      <label class="toggle"><input type="checkbox" id="toggle-boundaries" checked> Field boundaries</label>
+      <label class="toggle"><input type="checkbox" id="toggle-cdl" checked> CDL crop fill</label>
+      <label class="toggle"><input type="checkbox" id="toggle-soil"> SSURGO soils</label>
+      <label class="toggle"><input type="checkbox" id="toggle-ndvi"> Sentinel-2 NDVI</label>
+      <div class="control-row">
+        <label for="cdl-year">CDL year</label>
+        <select id="cdl-year"></select>
+      </div>
+      <div class="control-row">
+        <label for="ndvi-opacity">NDVI opacity</label>
+        <input type="range" id="ndvi-opacity" min="30" max="100" step="5" value="85">
+      </div>
+      <div id="legend" class="legend" aria-live="polite"></div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Fields <span id="field-total" class="hint"></span></h2>
+      <div class="filters">
+        <input id="search" type="search" placeholder="Search field, farm, ID" autocomplete="off">
+        <div id="state-chips" class="chips" role="group" aria-label="Filter by state"></div>
+      </div>
+      <div id="fields" class="field-list"></div>
+    </section>
+
+    <section class="panel panel-actions">
+      <button id="reset-view" type="button">Reset view</button>
+      <button id="labels-toggle" type="button">Labels on</button>
+    </section>
+  </aside>
+
+  <main id="mapwrap">
+    <div id="map"></div>
+    <div id="map-status" class="map-status hidden" role="status"></div>
+    <div id="ndvi-legend" class="ndvi-legend hidden"></div>
+  </main>
+
+  <aside id="inspector" aria-label="Field details">
+    <div id="inspector-empty" class="inspector-empty">
+      <h2>Select a field</h2>
+      <p>Click a field polygon on the map or a row in the field list to see its CDL crop history, weather summaries, SSURGO soil map units, and Sentinel-2 NDVI.</p>
+      <ul class="tips">
+        <li><b>CDL</b> fills are the dominant crop of the selected year, from USDA pixel counts.</li>
+        <li><b>Soils</b> are USDA NRCS SSURGO map units clipped to each field.</li>
+        <li><b>NDVI</b> is shown twice: observed 10 m raster pixels on the map and field-average summary values in the chart. They are never mixed.</li>
+      </ul>
+    </div>
+    <div id="inspector-body" class="hidden"></div>
+  </aside>
+</div>
+
+<div id="loading" class="loading">Loading mapping library and field data&hellip;</div>
+
+<script id="map-data" type="application/json">{{DATA_JSON}}</script>
+<script src="{{LEAFLET_JS}}"></script>
+<script>{{APP_JS}}</script>
+</body>
+</html>

@@ -9,6 +9,10 @@ pipeline's field boundaries.
 Do not use it for static PNG field maps (already produced by the pipeline), for
 basemap-free diagrams, or for embedding raster/NDVI layers.
 
+The separate [`field-explorer/`](field-explorer/README.md) generator is the
+exception: it adds opt-in SSURGO and NDVI layers for the three-state field map.
+It still never inlines raster bytes; overlays live in sibling PNG files.
+
 ## Entry point
 
 ```bash
@@ -38,6 +42,9 @@ Read [`README.md`](README.md) for outputs, options, and troubleshooting.
   2023; never present 2024+ crops as known.
 - Do not add this script to `run_farm_pipeline.py`. It is an explicit
   grower-level reporting command.
+- The field explorer is also an explicit reporting command. Keep its output in
+  `shared/web-maps/field-explorer/`, keep NDVI PNGs and soil GeoJSON as sibling
+  files, and keep field-average values visually distinct from raster pixels.
 
 ## Validation
 
