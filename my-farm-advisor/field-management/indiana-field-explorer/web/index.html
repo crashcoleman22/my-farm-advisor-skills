@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Indiana Field Explorer — Johnson County</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.2.0/css/all.min.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <i class="fa-solid fa-seedling"></i>
+    <div>
+      <strong>Indiana Field Explorer</strong>
+      <span>Johnson County, Indiana · FIPS 18081</span>
+    </div>
+  </div>
+  <div class="topstats" id="topstats">
+    <span><b id="stat-fields">—</b> fields</span>
+    <span><b id="stat-acres">—</b> acres</span>
+    <span><b id="stat-crop">—</b> crop fields</span>
+  </div>
+</header>
+
+<main class="shell">
+  <aside class="panel" id="panel">
+    <section class="block controls">
+      <div class="rowline">
+        <label for="year">Season</label>
+        <select id="year" class="form-select form-select-sm"></select>
+      </div>
+
+      <div class="rowline sliderline">
+        <label for="period">Biweekly period</label>
+        <button id="play" class="iconbtn" title="Animate periods" aria-label="Animate periods">
+          <i class="fa-solid fa-play"></i>
+        </button>
+      </div>
+      <input type="range" id="period" min="1" max="15" step="1" value="1">
+      <div class="periodlabel" id="period-label">—</div>
+
+      <div class="legend">
+        <div class="legendbar"></div>
+        <div class="legendticks"><span>0.10</span><span>0.35</span><span>0.60</span><span>0.85</span></div>
+        <div class="legendnote">Field-average NDVI</div>
+      </div>
+
+      <div class="statusline" id="statusline">Loading…</div>
+      <button id="compute" class="btn btn-sm btn-outline-success w-100 d-none">
+        <i class="fa-solid fa-gears me-1"></i>Compute this period
+      </button>
+      <div class="progress d-none" id="jobwrap"><div class="progress-bar" id="jobbar"></div></div>
+      <div class="jobnote d-none" id="jobnote"></div>
+    </section>
+
+    <section class="block detail d-none" id="detail">
+      <div class="detailhead">
+        <div>
+          <div class="eyebrow">Selected field</div>
+          <div class="fid" id="d-id">—</div>
+        </div>
+        <button class="iconbtn" id="close-detail" aria-label="Close field detail">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div class="chips">
+        <span class="chip" id="d-acres">—</span>
+        <span class="chip" id="d-class">—</span>
+        <span class="chip" id="d-crop">—</span>
+      </div>
+
+      <h3 class="h6 mt-3">Soils</h3>
+      <div class="soilname" id="d-soilname">—</div>
+      <div class="soilprops" id="d-soilprops"></div>
+      <div class="unitlist" id="d-units"></div>
+
+      <h3 class="h6 mt-3">Crop history</h3>
+      <table class="table table-sm croptable">
+        <thead><tr><th>Year</th><th>Crop</th><th class="text-end">% pixels</th></tr></thead>
+        <tbody id="d-croprows"></tbody>
+      </table>
+
+      <h3 class="h6 mt-3">Field-average NDVI trend</h3>
+      <div class="chartwrap"><canvas id="chart"></canvas></div>
+      <div class="chartnote" id="chartnote"></div>
+    </section>
+
+    <section class="block notes">
+      <div class="eyebrow">About</div>
+      <p class="small mb-1">
+        Boundaries: USDA CSB. Soils: NRCS SSURGO. Crop history: USDA CDL.
+        NDVI: Sentinel-2 L2A at 10 m, cloud/shadow masked, April 1 – October 31.
+      </p>
+      <p class="small mb-0 text-muted">
+        Biweekly value = valid-pixel-weighted mean of daily field means over dates with
+        ≥50 % valid coverage. Periods without usable imagery stay empty; nothing is filled in.
+      </p>
+    </section>
+  </aside>
+
+  <div id="map" class="map" role="application" aria-label="Johnson County field map"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
