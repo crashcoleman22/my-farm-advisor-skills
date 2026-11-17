@@ -1,5 +1,15 @@
 # Grower Web Maps
 
+This folder has two generators:
+
+| Generator | Scope | Output |
+|---|---|---|
+| `src/scripts/reporting/generate_grower_web_map.py` (Assignment 1) | One lightweight map per grower; geometry only | `<grower>_fields_map.html` |
+| [`field-explorer/`](field-explorer/README.md) | One three-state map for all 30 demo fields with CDL, SSURGO, and Sentinel-2 NDVI | `shared/web-maps/field-explorer/index.html` plus sibling soil and NDVI files |
+
+The rest of this file documents the Assignment 1 grower map. The field explorer
+has its own README with commands, outputs, data methods, tests, and limitations.
+
 One lightweight interactive HTML map per grower, built from the field polygons
 the data pipeline already downloaded. The map shows every field of the grower
 on an online satellite basemap, lets the user zoom, and opens a metadata popup
@@ -151,3 +161,23 @@ PY
 the map is regenerated on demand after boundaries or CDL tables change. If a
 grower gains fields later, re-run the command; the map is rebuilt from scratch
 and the manifest is overwritten.
+
+The field explorer is likewise a reporting command, not a farm-pipeline step.
+
+## Field explorer (SSURGO + NDVI)
+
+```bash
+"${DATA_PIPELINE_DATA_ROOT}/data-pipeline/.venv/bin/python" \
+  my-farm-advisor/data-pipeline/web-maps/field-explorer/generate.py \
+  --grower illinois-grower --grower iowa-grower --grower nebraska-grower \
+  --root "${DATA_PIPELINE_DATA_ROOT}"
+```
+
+This is a separate page from the grower map. It adds CDL history, SSURGO
+map-unit polygons, and Sentinel-2 NDVI. NDVI rasters are stored as sibling PNG
+overlays, never inline, and field averages are labelled separately from observed
+pixels. Serve `shared/web-maps/` on port 8771 and open
+`/field-explorer/index.html`.
+
+See [`field-explorer/README.md`](field-explorer/README.md) for the data methods,
+tests, storage numbers, and limitations.
