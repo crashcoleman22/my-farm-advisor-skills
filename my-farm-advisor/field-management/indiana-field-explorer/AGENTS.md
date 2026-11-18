@@ -23,10 +23,15 @@ For routing context read `../INDEX.md` and `../../SKILL.md`.
 - Never write datasets, cache files, or rasters into the repository. Everything
   generated goes under `$INDIANA_RUNTIME_ROOT/state/explorer/`.
 - The app must not fabricate NDVI. Missing periods stay `null` and surface as
-  `not_computed` or an empty value, never as an interpolated number.
+  `not_computed`, an empty value, or transparent pixels, never as an
+  interpolated number.
 - Do not expose cloud statistics or cloud layers in the UI; masking is internal.
 - Do not bulk-download imagery. Only per-period, per-tile COG windows are read,
-  and only for the requested 2020 window.
+  and only for the requested window.
+- The map shows per-pixel 10 m NDVI from cached raster composites. Field-average
+  NDVI belongs to the trend chart only.
+- Soil polygons come from the IndianaMap hosted SSURGO service and are cached;
+  do not download a statewide geodatabase.
 
 ## Running
 
@@ -37,9 +42,18 @@ PYTHONPATH=src "$INDIANA_RUNTIME_ROOT/venv-indiana/bin/python" \
   -m indiana_field_explorer serve --port 8420
 ```
 
+Build caches explicitly when needed:
+
+```bash
+PYTHONPATH=src ... -m indiana_field_explorer raster --year 2025 --periods 10
+PYTHONPATH=src ... -m indiana_field_explorer soils
+```
+
 ## Local validation
 
 - `python -m compileall src/indiana_field_explorer` for syntax.
+- `node --check web/app.js` for the browser bundle.
 - `curl -s localhost:8420/healthz` and `/api/meta` after starting the server.
+- Check `/api/ndvi-raster` and `/api/field-raster-stats` for a computed period.
 - Check one field's `/api/field/<id>` for soils, crops, and NDVI series.
 - Run `./scripts/validate.sh` from the repository root after structural changes.

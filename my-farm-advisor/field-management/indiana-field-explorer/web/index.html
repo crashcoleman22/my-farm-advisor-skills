@@ -16,7 +16,7 @@
     <i class="fa-solid fa-seedling"></i>
     <div>
       <strong>Indiana Field Explorer</strong>
-      <span>Johnson County, Indiana · FIPS 18081</span>
+      <span>Johnson County, Indiana · FIPS 18081 · 10 m NDVI</span>
     </div>
   </div>
   <div class="topstats" id="topstats">
@@ -31,7 +31,7 @@
     <section class="block controls">
       <div class="rowline">
         <label for="year">Season</label>
-        <select id="year" class="form-select form-select-sm"></select>
+        <select id="year" class="form-select form-select-sm w-auto"></select>
       </div>
 
       <div class="rowline sliderline">
@@ -40,18 +40,47 @@
           <i class="fa-solid fa-play"></i>
         </button>
       </div>
-      <input type="range" id="period" min="1" max="15" step="1" value="1">
+      <input type="range" id="period" min="1" max="15" step="1" value="10">
       <div class="periodlabel" id="period-label">—</div>
 
+      <div class="rowline mt-2">
+        <label for="ramp">Color ramp</label>
+        <select id="ramp" class="form-select form-select-sm w-auto">
+          <option value="rdylgn">NDVI (red–green)</option>
+          <option value="viridis">Viridis</option>
+          <option value="greens">Greens</option>
+          <option value="brbg">Brown–green</option>
+        </select>
+      </div>
+      <div class="rowline">
+        <label for="stretch">Scale</label>
+        <select id="stretch" class="form-select form-select-sm w-auto">
+          <option value="fixed">Fixed −0.2 … 1.0</option>
+          <option value="auto">Auto 2–98 %</option>
+          <option value="field" disabled>Selected field 2–98 %</option>
+          <option value="manual">Manual</option>
+        </select>
+      </div>
+      <div class="manualwrap d-none" id="manualwrap">
+        <input id="minval" type="number" step="0.01" value="-0.2" aria-label="Scale minimum">
+        <span>to</span>
+        <input id="maxval" type="number" step="0.01" value="1.0" aria-label="Scale maximum">
+      </div>
+
+      <div class="form-check form-switch soiltoggle">
+        <input class="form-check-input" type="checkbox" role="switch" id="soiltoggle">
+        <label class="form-check-label" for="soiltoggle">SSURGO soil map units</label>
+      </div>
+
       <div class="legend">
-        <div class="legendbar"></div>
-        <div class="legendticks"><span>0.10</span><span>0.35</span><span>0.60</span><span>0.85</span></div>
-        <div class="legendnote">Field-average NDVI</div>
+        <div class="legendbar" id="legendbar"></div>
+        <div class="legendticks" id="legendticks"><span>—</span><span>—</span><span>—</span></div>
+        <div class="legendnote" id="legendnote">NDVI · 10 m · cloud-masked</div>
       </div>
 
       <div class="statusline" id="statusline">Loading…</div>
       <button id="compute" class="btn btn-sm btn-outline-success w-100 d-none">
-        <i class="fa-solid fa-gears me-1"></i>Compute this period
+        <i class="fa-solid fa-gears me-1"></i>Compute 10 m NDVI for this period
       </button>
       <div class="progress d-none" id="jobwrap"><div class="progress-bar" id="jobbar"></div></div>
       <div class="jobnote d-none" id="jobnote"></div>
@@ -72,6 +101,9 @@
         <span class="chip" id="d-class">—</span>
         <span class="chip" id="d-crop">—</span>
       </div>
+
+      <h3 class="h6 mt-3">NDVI pixels at 10 m</h3>
+      <div class="pixstats" id="d-pixstats">No raster for this period.</div>
 
       <h3 class="h6 mt-3">Soils</h3>
       <div class="soilname" id="d-soilname">—</div>
@@ -95,9 +127,13 @@
         Boundaries: USDA CSB. Soils: NRCS SSURGO. Crop history: USDA CDL.
         NDVI: Sentinel-2 L2A at 10 m, cloud/shadow masked, April 1 – October 31.
       </p>
+      <p class="small mb-1">
+        The map shows the per-pixel mean of clear observations in each biweekly
+        window at native 10 m resolution. The trend chart uses the field-average
+        NDVI from the same daily observations.
+      </p>
       <p class="small mb-0 text-muted">
-        Biweekly value = valid-pixel-weighted mean of daily field means over dates with
-        ≥50 % valid coverage. Periods without usable imagery stay empty; nothing is filled in.
+        Pixels with no clear observation stay transparent; nothing is filled in.
       </p>
     </section>
   </aside>

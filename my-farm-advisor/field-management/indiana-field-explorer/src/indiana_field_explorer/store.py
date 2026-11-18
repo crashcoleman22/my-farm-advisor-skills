@@ -12,6 +12,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+from . import raster, soils_layer
 from .config import YEARS, periods_for, settings
 
 SOIL_FIELDS = (
@@ -55,6 +56,7 @@ class Store:
         self._cache_2020: pd.DataFrame | None = None
         self._stamp_2020: float = 0.0
         self._lock = threading.Lock()
+        self._soil_lock = threading.Lock()
         self._job: dict | None = None
 
     # ------------------------------------------------------------------
@@ -358,3 +360,156 @@ class Store:
         tmp = path.with_name(f"{path.stem}.{os.getpid()}.{threading.get_ident()}.tmp.parquet")
         frame.to_parquet(tmp, index=False)
         tmp.replace(path)
+
+    # ------------------------------------------------------------------
+    # Per-pixel NDVI raster composites
+    # ------------------------------------------------------------------
+    def raster_tif(self, year: int, period: int) -> Path:
+        return self.cfg.raster_cache / str(year) / f"P{period:02d}.tif"
+
+    def raster_png(self, year: int, period: int) -> Path:
+        return self.cfg.raster_cache / str(year) / f"P{period:02d}.png"
+
+    def raster_json(self, year: int, period: int) -> Path:
+        return self.cfg.raster_cache / str(year) / f"P{period:02d}.json"
+
+    def raster_info(self, year: int, period: int) -> dict:
+        meta_path = self.raster_json(year, period)
+        if not meta_path.exists() or not self.raster_tif(year, period).exists():
+            return {"year": year, "period": period, "status": "not_computed"}
+        payload = raster.load_json(meta_path)
+        payload["status"] = "ready" if payload.get("stats", {}).get("pixels") else "empty"
+        payload["png_url"] = f"/api/ndvi-raster.png?year={year}&period={period}"
+        return payload
+
+    def cached_rasters(self) -> list[dict]:
+        out = []
+        for meta_path in sorted(self.cfg.raster_cache.glob("*/P*.json")):
+            try:
+                payload = raster.load_json(meta_path)
+            except (OSError, ValueError):
+                continue
+            out.append({"year": payload.get("year"), "period": payload.get("period"),
+                        "label": payload.get("label")})
+        return out
+
+    def start_raster(self, year: int, period: int) -> dict:
+        with self._lock:
+            if self._job and self._job["state"] == "running":
+                return {"ok": False, "error": "a job is already running",
+                        "job": dict(self._job)}
+            if self.raster_json(year, period).exists():
+                self._job = {"state": "done", "kind": "raster", "year": year,
+                             "period": period, "done": 1, "total": 1,
+                             "message": "already cached", "error": None}
+                return {"ok": True, "job": dict(self._job)}
+            self._job = {"state": "running", "kind": "raster", "year": year,
+                         "period": period, "done": 0, "total": 1,
+                         "message": "starting", "error": None}
+        threading.Thread(target=self._run_raster, args=(year, period), daemon=True).start()
+        return {"ok": True, "job": self.job()}
+
+    def _run_raster(self, year: int, period: int) -> None:
+        try:
+            self._build_raster(year, period)
+            self._set_job(state="done", message=f"{year} P{period:02d} cached")
+        except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+            self._set_job(state="error", error=str(exc), message="failed")
+
+    def _build_raster(self, year: int, period: int) -> None:
+        tif_path = self.raster_tif(year, period)
+        if tif_path.exists() and self.raster_json(year, period).exists():
+            return
+
+        sys.path.insert(0, str(self.cfg.discovery_src))
+        from indiana_field_discovery import ndvi as discovery_ndvi
+
+        grid_path = self.cfg.field_index_dir / "field_index.tif"
+        if not grid_path.exists():
+            raise FileNotFoundError(
+                f"missing {grid_path}; run one 2020 aggregate period first")
+        grid = raster.grid_from(grid_path)
+
+        window = periods_for(year)[period - 1]
+        crop = self.fields[self.fields["ag_class"] == "crop"]
+        wgs_bounds = tuple(float(v) for v in crop.to_crs(4326).total_bounds)
+
+        self._set_job(message="searching STAC", done=0, total=1)
+        items = discovery_ndvi.search_items(wgs_bounds, window["start"], window["end"])
+        items = discovery_ndvi.dedupe_by_date(items)
+        if not items:
+            raise RuntimeError(f"no Sentinel-2 items for {window['start']}..{window['end']}")
+
+        self._set_job(total=len(items))
+
+        def progress(message: str, done: int, total: int) -> None:
+            self._set_job(message=message, done=done, total=max(total, 1))
+
+        ndvi, days = raster.build_composite(items, grid, discovery_ndvi.SCL_MASK,
+                                            progress=progress)
+        stats = raster.raster_stats(ndvi)
+
+        self._set_job(message="writing raster", done=len(items), total=len(items))
+        raster.write_geotiff(tif_path, ndvi, grid)
+        raster.write_gray_alpha_png(self.raster_png(year, period), ndvi)
+
+        from rasterio.warp import transform_bounds
+        left, bottom, right, top = transform_bounds(
+            grid["crs"], "EPSG:4326", *grid["bounds"])
+        meta = {
+            "year": year,
+            "period": period,
+            "start": window["start"],
+            "end": window["end"],
+            "label": window["label"],
+            "width": grid["width"],
+            "height": grid["height"],
+            "resolution_m": 10,
+            "crs": grid["crs"].to_string(),
+            "bounds": [[bottom, left], [top, right]],
+            "bounds_utm": list(grid["bounds"]),
+            "dates": days,
+            "n_dates": len(days),
+            "method": "mean of clear Sentinel-2 observations per 10 m pixel",
+            "encoding": {"min": raster.NDVI_MIN, "max": raster.NDVI_MAX,
+                         "scheme": "gray8 alpha8"},
+            "stats": stats,
+        }
+        meta_path = self.raster_json(year, period)
+        tmp = meta_path.with_name(f"{meta_path.stem}.tmp.json")
+        tmp.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(meta_path)
+
+    def field_raster_stats(self, field_id: str, year: int, period: int) -> dict | None:
+        if field_id not in self._by_id.index:
+            return None
+        tif_path = self.raster_tif(year, period)
+        if not tif_path.exists():
+            return {"status": "not_computed", "field_id": field_id,
+                    "year": year, "period": period}
+        row = self._by_id.loc[field_id]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[0]
+        geometry = self.fields[self.fields["field_id"] == field_id].to_crs(32616) \
+            .geometry.iloc[0]
+        stats = raster.field_stats(tif_path, geometry)
+        if stats is None:
+            return {"status": "no_pixels", "field_id": field_id,
+                    "year": year, "period": period}
+        return {"status": "ready", "field_id": field_id, "year": year,
+                "period": period, **stats}
+
+    # ------------------------------------------------------------------
+    # SSURGO soil polygons
+    # ------------------------------------------------------------------
+    def soils_geojson(self) -> dict:
+        if self.cfg.soil_cache.exists():
+            return json.loads(self.cfg.soil_cache.read_text(encoding="utf-8"))
+        with self._soil_lock:
+            if self.cfg.soil_cache.exists():
+                return json.loads(self.cfg.soil_cache.read_text(encoding="utf-8"))
+            soils_layer.build(self.cfg, self.fields)
+            return json.loads(self.cfg.soil_cache.read_text(encoding="utf-8"))
+
+    def build_soils(self) -> dict:
+        return soils_layer.build(self.cfg, self.fields)

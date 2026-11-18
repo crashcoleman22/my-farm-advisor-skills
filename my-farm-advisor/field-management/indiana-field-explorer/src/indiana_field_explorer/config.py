@@ -8,17 +8,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 YEARS = (2020, 2021, 2022, 2023, 2024, 2025, 2026)
-SEASON_START = date(2000, 4, 1)  # month/day only
-
-
-def _period_starts(year: int) -> list[date]:
-    starts: list[date] = []
-    cursor = date(year, 4, 1)
-    end_of_season = date(year, 10, 31)
-    while cursor <= end_of_season:
-        starts.append(cursor)
-        cursor = cursor + timedelta(days=14)
-    return starts
 
 
 def periods_for(year: int) -> list[dict]:
@@ -68,6 +57,18 @@ class Settings:
     @property
     def field_index_dir(self) -> Path:
         return self.cache_dir / "field_index"
+
+    @property
+    def raster_cache(self) -> Path:
+        return self.cache_dir / "ndvi_raster"
+
+    @property
+    def soil_cache(self) -> Path:
+        return self.cache_dir / "soil_map_units.geojson"
+
+    @property
+    def soil_provenance(self) -> Path:
+        return self.cache_dir / "soil_map_units.provenance.json"
 
     @property
     def web_dir(self) -> Path:

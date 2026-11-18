@@ -25,10 +25,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------
     def _send(self, status: int, body: bytes, content_type: str,
-              cache: str = "no-store") -> None:
+              cache: str = "no-store", compress: bool | None = None) -> None:
         accepts_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "")
+        if compress is None:
+            compress = not content_type.startswith("image/")
         gzipped = body
-        if accepts_gzip and len(body) > 1024:
+        if accepts_gzip and compress and len(body) > 1024:
             gzipped = gzip.compress(body, 6)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -70,6 +72,35 @@ class Handler(BaseHTTPRequestHandler):
                 if not 1 <= period <= 15:
                     return self._error(400, "period out of range")
                 return self._json(self.store.period_values(year, period))
+            if path == "/api/ndvi-raster":
+                year = int(query.get("year", ["2021"])[0])
+                period = int(query.get("period", ["1"])[0])
+                if year not in (2020, 2021, 2022, 2023, 2024, 2025, 2026):
+                    return self._error(400, "year out of range")
+                if not 1 <= period <= 15:
+                    return self._error(400, "period out of range")
+                return self._json(self.store.raster_info(year, period))
+            if path == "/api/ndvi-raster.png":
+                year = int(query.get("year", ["2021"])[0])
+                period = int(query.get("period", ["1"])[0])
+                png = self.store.raster_png(year, period)
+                if not png.exists():
+                    return self._error(404, "raster not computed")
+                return self._send(200, png.read_bytes(), "image/png",
+                                  cache="public, max-age=3600")
+            if path == "/api/field-raster-stats":
+                field_id = query.get("field_id", [""])[0]
+                year = int(query.get("year", ["2021"])[0])
+                period = int(query.get("period", ["1"])[0])
+                stats = self.store.field_raster_stats(field_id, year, period)
+                if stats is None:
+                    return self._error(404, "unknown field_id")
+                return self._json(stats)
+            if path == "/api/rasters":
+                return self._json({"rasters": self.store.cached_rasters()})
+            if path == "/api/soils.geojson":
+                return self._json(self.store.soils_geojson(),
+                                  cache="public, max-age=3600")
             if path.startswith("/api/field/"):
                 field_id = path.rsplit("/", 1)[-1]
                 detail = self.store.field_detail(field_id)
@@ -94,6 +125,17 @@ class Handler(BaseHTTPRequestHandler):
             if not 1 <= period <= 15:
                 return self._error(400, "period out of range")
             return self._json(self.store.start_2020(period))
+        if parsed.path.startswith("/api/compute-raster/"):
+            parts = parsed.path.strip("/").split("/")
+            try:
+                year, period = int(parts[-2]), int(parts[-1])
+            except (ValueError, IndexError):
+                return self._error(400, "bad year or period")
+            if year not in (2020, 2021, 2022, 2023, 2024, 2025, 2026):
+                return self._error(400, "year out of range")
+            if not 1 <= period <= 15:
+                return self._error(400, "period out of range")
+            return self._json(self.store.start_raster(year, period))
         self._error(404, "not found")
 
     # ------------------------------------------------------------------
