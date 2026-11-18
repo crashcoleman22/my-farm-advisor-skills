@@ -26,33 +26,41 @@ const state = {
   meta: null,
   year: 2025,
   period: 10,
-  soil: { visible: false, layer: null, data: null },
-  raster: {
-    info: null,
-    pixels: null,
-    shape: [0, 0],
-    overlay: null,
-    canvas: null,
-    imageData: null,
-    url: null,
-    token: 0,
-    timer: null,
-  },
   scale: { ramp: "rdylgn", stretch: "fixed", min: -0.2, max: 1.0 },
-  fieldFeatures: [],
-  fieldLayer: null,
   map: null,
+  fieldLayer: null,
   layers: {},
+  featureById: new Map(),
+  fieldFeatures: [],
   selected: null,
-  selectedStats: null,
+  selectionToken: 0,
+  selectionAbort: null,
   chart: null,
   timer: null,
   polling: null,
   job: null,
+  rasterMeta: null,
+  rasterToken: 0,
+  ndvi: {
+    visible: true,
+    info: null,
+    canvas: null,
+    pixels: null,
+    imageData: null,
+    overlay: null,
+    url: null,
+    paintId: 0,
+    timer: null,
+    token: 0,
+  },
+  soil: { visible: false, data: null, layer: null, token: 0 },
 };
 
 const el = (id) => document.getElementById(id);
 const fmt = (v, n = 2) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(n));
+const esc = (value) => String(value == null ? "" : value)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
 
 /* ------------------------------------------------------------------ */
 /* Color ramps                                                         */
@@ -84,75 +92,35 @@ function rampCss(stops) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Geo helpers                                                         */
-/* ------------------------------------------------------------------ */
-function pointInRing(x, y, ring) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const xi = ring[i][0];
-    const yi = ring[i][1];
-    const xj = ring[j][0];
-    const yj = ring[j][1];
-    if (((yi > y) !== (yj > y))
-        && (x < ((xj - xi) * (y - yi)) / (yj - yi || 1e-12) + xi)) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
-function pointInPolygon(x, y, rings) {
-  if (!rings.length || !pointInRing(x, y, rings[0])) return false;
-  for (let i = 1; i < rings.length; i += 1) {
-    if (pointInRing(x, y, rings[i])) return false;
-  }
-  return true;
-}
-
-function fieldAt(latlng) {
-  const x = latlng.lng;
-  const y = latlng.lat;
-  for (const feature of state.fieldFeatures) {
-    const bb = feature._bbox;
-    if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
-    const geom = feature.geometry;
-    if (geom.type === "Polygon") {
-      if (pointInPolygon(x, y, geom.coordinates)) return feature.properties.field_id;
-    } else if (geom.type === "MultiPolygon") {
-      for (const poly of geom.coordinates) {
-        if (pointInPolygon(x, y, poly)) return feature.properties.field_id;
-      }
-    }
-  }
-  return null;
-}
-
-function bboxOf(geom) {
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  const walk = (coords) => {
-    if (typeof coords[0] === "number") {
-      x0 = Math.min(x0, coords[0]); x1 = Math.max(x1, coords[0]);
-      y0 = Math.min(y0, coords[1]); y1 = Math.max(y1, coords[1]);
-      return;
-    }
-    coords.forEach(walk);
-  };
-  walk(geom.coordinates);
-  return [x0, y0, x1, y1];
-}
-
-/* ------------------------------------------------------------------ */
 /* Map                                                                 */
 /* ------------------------------------------------------------------ */
 function styleField(feature) {
   const crop = feature.properties.ag_class === "crop";
   return {
     color: crop ? "rgba(25,45,25,.55)" : "rgba(70,90,70,.35)",
-    weight: crop ? 0.7 : 0.4,
+    weight: crop ? 0.8 : 0.5,
     fillColor: "#ffffff",
     fillOpacity: 0.01,
     opacity: 1,
   };
+}
+
+function selectedStyle() {
+  return {
+    color: "#ffd400",
+    weight: 3.6,
+    opacity: 1,
+    fillColor: "#ffd400",
+    fillOpacity: 0.08,
+  };
+}
+
+function restyleFeature(feature) {
+  if (!feature) return;
+  const id = feature.properties.field_id;
+  const lyr = state.layers[id];
+  if (!lyr) return;
+  lyr.setStyle(state.selected === id ? selectedStyle() : styleField(feature));
 }
 
 function soilColor(musym) {
@@ -164,7 +132,7 @@ function soilColor(musym) {
 function styleSoil(feature) {
   return {
     color: "#3f3324",
-    weight: 0.6,
+    weight: 0.7,
     fillColor: soilColor(feature.properties.musym || ""),
     fillOpacity: 0.45,
   };
@@ -181,8 +149,8 @@ function soilPopup(p) {
     ["Water table", p.wt_depth_cm == null ? "—" : `${p.wt_depth_cm} cm`],
     ["Flood frequency", p.flood_freq || "—"],
   ];
-  return `<div class="soilpop"><b>${p.musym}</b> — ${p.muname}`
-    + `<table>${rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("")}</table></div>`;
+  return `<div class="soilpop"><b>${esc(p.musym)}</b> — ${esc(p.muname)}`
+    + `<table>${rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("")}</table></div>`;
 }
 
 function buildMap(fields) {
@@ -191,8 +159,8 @@ function buildMap(fields) {
   state.map = map;
 
   map.createPane("ndviPane").style.zIndex = 350;
+  map.createPane("soilPane").style.zIndex = 360;
   map.createPane("fieldPane").style.zIndex = 400;
-  map.createPane("soilPane").style.zIndex = 410;
 
   L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -200,53 +168,209 @@ function buildMap(fields) {
   ).addTo(map);
 
   state.fieldFeatures = fields.features;
-  fields.features.forEach((f) => { f._bbox = bboxOf(f.geometry); });
+  fields.features.forEach((f) => {
+    f._bbox = FieldGeo.bboxOf(f.geometry);
+    state.featureById.set(f.properties.field_id, f);
+  });
 
+  // Fields are the only interactive vector layer. NDVI and soil layers are
+  // non-interactive so field clicks always reach this canvas and the map.
   state.fieldLayer = L.geoJSON(fields, {
     pane: "fieldPane",
     style: styleField,
     onEachFeature(feature, lyr) {
-      state.layers[feature.properties.field_id] = lyr;
+      const id = feature.properties.field_id;
+      state.layers[id] = lyr;
       lyr.bindTooltip(() => {
         const p = feature.properties;
-        const crop = p.crop_name ? ` · ${p.crop_name}` : "";
-        return `<b>${p.acres.toFixed(1)} ac</b>${crop}`;
+        const crop = p.crop_name ? ` · ${esc(p.crop_name)}` : "";
+        return `<b>${Number(p.acres).toFixed(1)} ac</b>${crop}`
+          + `<br><span class="toolid">${esc(id)}</span>`;
       }, { sticky: true, className: "leaflet-tooltip" });
-      lyr.on("mouseover", () => lyr.setStyle({ weight: 2.4, color: "#123d14" }));
-      lyr.on("mouseout", () => lyr.setStyle(styleField(feature)));
-      lyr.on("click", () => selectField(feature.properties.field_id));
+      lyr.on("mouseover", () => {
+        if (state.selected !== id) {
+          lyr.setStyle({ weight: 2.4, color: "#123d14" });
+        }
+      });
+      lyr.on("mouseout", () => restyleFeature(feature));
     },
   }).addTo(map);
 
-  map.on("click", (event) => {
-    const fieldId = fieldAt(event.latlng);
-    if (fieldId) selectField(fieldId);
-  });
+  map.on("click", onMapClick);
 
   map.fitBounds(state.fieldLayer.getBounds(), { padding: [12, 12] });
 }
 
+function onMapClick(event) {
+  const hit = FieldGeo.fieldAt(state.fieldFeatures, event.latlng.lng, event.latlng.lat);
+  if (!hit) {
+    clearSelection();
+    return;
+  }
+  const id = hit.properties.field_id;
+  if (state.selected && id === state.selected) {
+    // A click inside the selected field inspects soil attributes; it must not
+    // change which field is selected.
+    if (state.soil.visible) {
+      const soil = soilAt(event.latlng);
+      if (soil) showSoilPopup(soil, event.latlng);
+    }
+    return;
+  }
+  selectField(id);
+}
+
+function soilAt(latlng) {
+  if (!state.soil.data) return null;
+  for (const feature of state.soil.data.features) {
+    if (!feature._bbox) feature._bbox = FieldGeo.bboxOf(feature.geometry);
+    const bb = feature._bbox;
+    if (latlng.lng < bb[0] || latlng.lng > bb[2]
+        || latlng.lat < bb[1] || latlng.lat > bb[3]) continue;
+    if (FieldGeo.contains(feature, latlng.lng, latlng.lat)) return feature;
+  }
+  return null;
+}
+
+function showSoilPopup(feature, latlng) {
+  L.popup({ maxWidth: 340 })
+    .setLatLng(latlng)
+    .setContent(soilPopup(feature.properties))
+    .openOn(state.map);
+}
+
 /* ------------------------------------------------------------------ */
-/* Raster                                                              */
+/* Selection                                                           */
+/* ------------------------------------------------------------------ */
+function setTogglesEnabled(enabled) {
+  el("ndvitoggle").disabled = !enabled;
+  el("soiltoggle").disabled = !enabled;
+}
+
+function setNdviStatus(text, kind) {
+  const node = el("ndvi-status");
+  node.textContent = text;
+  node.classList.toggle("error", kind === "error");
+  node.classList.toggle("loading", kind === "loading");
+}
+
+function setSoilStatus(text, kind) {
+  const node = el("soil-status");
+  node.textContent = text;
+  node.classList.toggle("error", kind === "error");
+  node.classList.toggle("loading", kind === "loading");
+}
+
+function selectField(fieldId) {
+  const feature = state.featureById.get(fieldId);
+  if (!feature) return;
+
+  const previous = state.selected;
+  state.selected = fieldId;
+  const token = (state.selectionToken += 1);
+  if (state.selectionAbort) state.selectionAbort.abort();
+  const controller = new AbortController();
+  state.selectionAbort = controller;
+
+  if (previous && previous !== fieldId) {
+    restyleFeature(state.featureById.get(previous));
+  }
+  const lyr = state.layers[fieldId];
+  if (lyr) {
+    lyr.setStyle(selectedStyle());
+    if (lyr.bringToFront) lyr.bringToFront();
+    state.map.fitBounds(lyr.getBounds(), { padding: [28, 28], maxZoom: 16 });
+  }
+  state.map.closePopup();
+
+  setTogglesEnabled(true);
+  showDetailLoading(feature);
+  el("selecthint").textContent =
+    `Selected ${fieldId} · click another field to switch · Esc or ✕ clears.`;
+
+  const tasks = [loadFieldDetail(fieldId, token, controller.signal)];
+
+  if (state.ndvi.visible) {
+    setNdviStatus("Loading 10 m NDVI…", "loading");
+    tasks.push(loadFieldNdvi(fieldId, token, controller.signal));
+  } else {
+    clearNdviOverlay();
+    state.ndvi.info = null;
+    setNdviStatus("NDVI hidden.");
+    setPixelStatsMessage("NDVI layer is hidden.");
+    updateFieldStretchOption();
+    updateLegend();
+  }
+
+  if (state.soil.visible) {
+    setSoilStatus("Loading SSURGO polygons…", "loading");
+    tasks.push(loadFieldSoils(fieldId, token, controller.signal));
+  } else {
+    clearSoilLayer();
+    state.soil.data = null;
+    setSoilStatus("SSURGO hidden.");
+  }
+
+  Promise.allSettled(tasks);
+}
+
+function clearSelection() {
+  const previous = state.selected;
+  if (!previous) return;
+
+  state.selectionToken += 1;
+  if (state.selectionAbort) {
+    state.selectionAbort.abort();
+    state.selectionAbort = null;
+  }
+  state.selected = null;
+  restyleFeature(state.featureById.get(previous));
+
+  clearNdviOverlay();
+  state.ndvi.info = null;
+  clearSoilLayer();
+  state.soil.data = null;
+
+  el("detail").classList.add("d-none");
+  el("d-error").classList.add("d-none");
+  if (state.chart) {
+    state.chart.destroy();
+    state.chart = null;
+  }
+
+  setTogglesEnabled(false);
+  setNdviStatus(state.ndvi.visible
+    ? "Select a field to view 10 m NDVI." : "NDVI hidden.");
+  setSoilStatus(state.soil.visible
+    ? "Select a field to view SSURGO soils." : "SSURGO hidden.");
+  el("selecthint").textContent = "Click a field to zoom and load its NDVI and soils.";
+  state.map.closePopup();
+
+  if (state.scale.stretch === "field") {
+    state.scale.stretch = "fixed";
+    el("stretch").value = "fixed";
+  }
+  updateFieldStretchOption();
+  updateLegend();
+}
+
+/* ------------------------------------------------------------------ */
+/* NDVI colorisation                                                   */
 /* ------------------------------------------------------------------ */
 function encodingDomain() {
-  const enc = state.raster.info && state.raster.info.encoding;
+  const enc = state.ndvi.info && state.ndvi.info.encoding;
   return [enc ? enc.min : -0.2, enc ? enc.max : 1.0];
 }
 
 function currentDomain() {
   const [encMin, encMax] = encodingDomain();
-  const info = state.raster.info;
   const mode = state.scale.stretch;
+  const stats = state.ndvi.info && state.ndvi.info.stats;
 
-  if (mode === "auto" && info && info.stats && info.stats.pixels) {
-    const lo = info.stats.p02;
-    const hi = info.stats.p98;
-    if (hi - lo > 0.02) return [lo, hi];
-  }
-  if (mode === "field" && state.selectedStats && state.selectedStats.status === "ready") {
-    const lo = state.selectedStats.p02;
-    const hi = state.selectedStats.p98;
+  if (mode === "field" && state.ndvi.info && state.ndvi.info.status === "ready"
+      && stats && stats.pixels) {
+    const lo = stats.p02;
+    const hi = stats.p98;
     if (hi - lo > 0.02) return [lo, hi];
   }
   if (mode === "manual") {
@@ -264,103 +388,78 @@ function updateLegend() {
   const mid = (lo + hi) / 2;
   el("legendticks").innerHTML =
     `<span>${fmt(lo, 2)}</span><span>${fmt(mid, 2)}</span><span>${fmt(hi, 2)}</span>`;
-  const info = state.raster.info;
-  el("legendnote").textContent = info && info.status === "ready"
-    ? `NDVI · ${info.year} P${String(info.period).padStart(2, "0")} · ${info.n_dates} clear dates`
-    : "NDVI · no composite loaded";
+
+  const info = state.ndvi.info;
+  if (info && info.status === "ready") {
+    el("legendnote").textContent =
+      `NDVI · ${info.year} P${String(info.period).padStart(2, "0")}`
+      + ` · selected field · ${info.n_dates || 0} clear dates`;
+  } else if (state.rasterMeta && state.rasterMeta.status === "ready") {
+    el("legendnote").textContent =
+      `NDVI · ${state.year} P${String(state.period).padStart(2, "0")}`
+      + " · select a field to display";
+  } else {
+    el("legendnote").textContent = "NDVI · no composite loaded";
+  }
 }
 
-function renderStatus() {
-  const info = state.raster.info;
-  if (!info || info.status === "not_computed") {
-    el("statusline").innerHTML =
-      `<b>${state.year}</b> P${String(state.period).padStart(2, "0")} has no 10 m composite yet.`;
-    el("compute").classList.remove("d-none");
-    return;
+function updateFieldStretchOption() {
+  const opt = el("stretch").querySelector('option[value="field"]');
+  const ready = Boolean(state.ndvi.info && state.ndvi.info.status === "ready"
+    && state.ndvi.info.stats && state.ndvi.info.stats.pixels);
+  opt.disabled = !ready;
+  opt.textContent = ready ? "Selected field 2–98 %" : "Selected field (pick a field)";
+  if (!ready && state.scale.stretch === "field") {
+    state.scale.stretch = "fixed";
+    el("stretch").value = "fixed";
   }
-  if (info.status === "empty") {
-    el("statusline").innerHTML =
-      "No clear Sentinel-2 pixels for this period. Nothing is filled in.";
-    el("compute").classList.add("d-none");
-    return;
-  }
-  const s = info.stats;
-  el("statusline").innerHTML =
-    `<b>10 m NDVI</b> · ${s.pixels.toLocaleString()} px · ${info.n_dates} dates · `
-    + `mean <b>${fmt(s.mean, 3)}</b> · ${fmt(s.min, 2)}–${fmt(s.max, 2)}`;
-  el("compute").classList.add("d-none");
 }
 
-async function loadRaster() {
-  const { year, period } = state;
-  const token = (state.raster.token += 1);
-  el("statusline").textContent = "Loading 10 m NDVI…";
-  el("compute").classList.add("d-none");
-
-  let info;
-  try {
-    info = await fetch(`/api/ndvi-raster?year=${year}&period=${period}`)
-      .then((r) => r.json());
-  } catch (err) {
-    el("statusline").textContent = `Raster request failed: ${err.message}`;
+function renderPixelStats(payload) {
+  const box = el("d-pixstats");
+  if (!payload || payload.status === "not_computed") {
+    box.innerHTML = `<span class="muted">No 10 m composite for ${state.year} P${String(state.period).padStart(2, "0")}.</span>`;
     return;
   }
-  if (token !== state.raster.token) return;
-
-  state.raster.info = info;
-  clearOverlay();
-  renderStatus();
-  updateLegend();
-  updateFieldStretchOption();
-
-  if (info.status !== "ready") {
-    state.selectedStats = null;
-    updateFieldStretchOption();
-    if (state.selected) renderPixelStats({ status: "not_computed" });
+  if (payload.status === "no_pixels") {
+    box.innerHTML = `<span class="muted">No clear pixels inside this field for this period.</span>`;
     return;
   }
-
-  const img = new Image();
-  img.crossOrigin = "anonymous";
-  const loaded = new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = () => reject(new Error("could not load raster image"));
-  });
-  img.src = `${info.png_url}&v=${Date.now()}`;
-  try {
-    await loaded;
-  } catch (err) {
-    el("statusline").textContent = err.message;
+  if (payload.status === "error") {
+    box.innerHTML = `<span class="muted">NDVI unavailable: ${esc(payload.error || "unknown error")}</span>`;
     return;
   }
-  if (token !== state.raster.token) return;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0);
-  const source = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  state.raster.canvas = canvas;
-  state.raster.pixels = source.data;
-  state.raster.imageData = ctx.createImageData(canvas.width, canvas.height);
-  state.raster.shape = [canvas.height, canvas.width];
-  state.raster.paintId = (state.raster.paintId || 0) + 1;
-  paintRaster();
-
-  if (state.selected) refreshSelectedStats();
+  const s = payload.stats;
+  if (!s || !s.pixels) {
+    box.innerHTML = `<span class="muted">No 10 m NDVI for this field and period.</span>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="pixgrid">
+      <div>pixels <b>${Number(s.pixels).toLocaleString()}</b></div>
+      <div>min <b>${fmt(s.min, 3)}</b></div>
+      <div>max <b>${fmt(s.max, 3)}</b></div>
+      <div>mean <b>${fmt(s.mean, 3)}</b></div>
+      <div>std <b>${fmt(s.std, 3)}</b></div>
+      <div>p02–p98 <b>${fmt(s.p02, 2)}–${fmt(s.p98, 2)}</b></div>
+    </div>`;
 }
 
-function paintRaster() {
-  const pixels = state.raster.pixels;
-  if (!pixels) return;
-  const paintId = (state.raster.paintId = (state.raster.paintId || 0) + 1);
+function setPixelStatsMessage(message) {
+  el("d-pixstats").innerHTML = `<span class="muted">${esc(message)}</span>`;
+}
+
+function paintNdvi() {
+  if (!state.ndvi.pixels || !state.ndvi.canvas || !state.ndvi.info
+      || state.ndvi.info.status !== "ready") return;
+
+  const paintId = (state.ndvi.paintId += 1);
   const [encMin, encMax] = encodingDomain();
   const [lo, hi] = currentDomain();
   const span = hi - lo || 1;
   const lut = buildLut(RAMPS[state.scale.ramp] || RAMPS.rdylgn);
-  const out = state.raster.imageData.data;
-  const alpha = state.soil.visible ? 205 : 235;
+  const pixels = state.ndvi.pixels;
+  const out = state.ndvi.imageData.data;
 
   for (let i = 0; i < pixels.length; i += 4) {
     if (pixels[i + 3] === 0) {
@@ -374,121 +473,348 @@ function paintRaster() {
     out[i] = lut[k * 3];
     out[i + 1] = lut[k * 3 + 1];
     out[i + 2] = lut[k * 3 + 2];
-    out[i + 3] = alpha;
+    out[i + 3] = 235;
   }
-  state.raster.canvas.getContext("2d").putImageData(state.raster.imageData, 0, 0);
+  state.ndvi.canvas.getContext("2d")
+    .putImageData(state.ndvi.imageData, 0, 0);
   scheduleOverlayUpdate(paintId);
 }
 
 function scheduleOverlayUpdate(paintId) {
-  const token = state.raster.token;
-  clearTimeout(state.raster.timer);
-  state.raster.timer = setTimeout(() => {
-    const canvas = state.raster.canvas;
-    if (!canvas) return;
+  const token = state.selectionToken;
+  const ndviToken = state.ndvi.token;
+  clearTimeout(state.ndvi.timer);
+  state.ndvi.timer = setTimeout(() => {
+    const canvas = state.ndvi.canvas;
+    const info = state.ndvi.info;
+    if (!canvas || !info || info.status !== "ready") return;
     canvas.toBlob((blob) => {
-      if (!blob || token !== state.raster.token
-          || paintId !== state.raster.paintId) return;
+      if (!blob || token !== state.selectionToken
+          || ndviToken !== state.ndvi.token
+          || paintId !== state.ndvi.paintId || !state.ndvi.info) return;
       const url = URL.createObjectURL(blob);
-      const info = state.raster.info;
-      if (state.raster.overlay) {
-        state.raster.overlay.setUrl(url);
+      if (state.ndvi.overlay) {
+        state.ndvi.overlay.setUrl(url);
       } else {
-        state.raster.overlay = L.imageOverlay(url, info.bounds, {
-          pane: "ndviPane", opacity: 0.92, interactive: false,
+        state.ndvi.overlay = L.imageOverlay(url, info.bounds, {
+          pane: "ndviPane",
+          opacity: 0.95,
+          interactive: false,
           className: "ndvi-img",
         }).addTo(state.map);
       }
-      if (state.raster.url) URL.revokeObjectURL(state.raster.url);
-      state.raster.url = url;
+      if (state.ndvi.url) URL.revokeObjectURL(state.ndvi.url);
+      state.ndvi.url = url;
     }, "image/png");
-  }, 120);
+  }, 100);
 }
 
-function clearOverlay() {
-  if (state.raster.overlay) {
-    state.map.removeLayer(state.raster.overlay);
-    state.raster.overlay = null;
+function clearNdviOverlay() {
+  state.ndvi.token += 1;
+  clearTimeout(state.ndvi.timer);
+  if (state.ndvi.overlay) {
+    state.map.removeLayer(state.ndvi.overlay);
+    state.ndvi.overlay = null;
   }
-  if (state.raster.url) {
-    URL.revokeObjectURL(state.raster.url);
-    state.raster.url = null;
+  if (state.ndvi.url) {
+    URL.revokeObjectURL(state.ndvi.url);
+    state.ndvi.url = null;
   }
-  state.raster.pixels = null;
-  state.raster.imageData = null;
-  state.raster.canvas = null;
+  state.ndvi.pixels = null;
+  state.ndvi.imageData = null;
+  state.ndvi.canvas = null;
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("could not load field NDVI image"));
+    img.src = src;
+  });
+}
+
+function isAbort(err) {
+  return err && (err.name === "AbortError" || err.code === 20);
+}
+
+async function loadFieldNdvi(fieldId, token, signal) {
+  const { year, period } = state;
+  clearNdviOverlay();
+  const ndviToken = state.ndvi.token;
+  const stale = () => token !== state.selectionToken || ndviToken !== state.ndvi.token;
+
+  state.ndvi.info = null;
+  updateFieldStretchOption();
+  setNdviStatus("Loading 10 m NDVI…", "loading");
+
+  let info;
+  try {
+    const res = await fetch(
+      `/api/field-ndvi?field_id=${encodeURIComponent(fieldId)}&year=${year}&period=${period}`,
+      { signal });
+    if (!res.ok) throw new Error(`request failed (${res.status})`);
+    info = await res.json();
+  } catch (err) {
+    if (isAbort(err) || stale()) return;
+    setNdviStatus(`NDVI failed: ${err.message}`, "error");
+    return;
+  }
+  if (stale()) return;
+
+  state.ndvi.info = info;
+  renderPixelStats(info);
+  updateFieldStretchOption();
+  updateLegend();
+
+  if (info.status !== "ready") {
+    setNdviStatus(info.status === "not_computed"
+      ? "No 10 m composite for this period."
+      : "No clear NDVI pixels in this field.");
+    return;
+  }
+
+  let img;
+  try {
+    img = await loadImage(`${info.png_url}&v=${Date.now()}`);
+  } catch (err) {
+    if (stale()) return;
+    setNdviStatus(`NDVI failed: ${err.message}`, "error");
+    return;
+  }
+  if (stale()) return;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  state.ndvi.canvas = canvas;
+  state.ndvi.pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  state.ndvi.imageData = ctx.createImageData(canvas.width, canvas.height);
+  paintNdvi();
+
+  const s = info.stats || {};
+  setNdviStatus(
+    `${Number(s.pixels || 0).toLocaleString()} px · mean ${fmt(s.mean, 3)}`
+    + ` · ${fmt(s.min, 2)}–${fmt(s.max, 2)}`);
 }
 
 /* ------------------------------------------------------------------ */
 /* Soils                                                               */
 /* ------------------------------------------------------------------ */
-async function toggleSoils(visible) {
-  state.soil.visible = visible;
-  if (!visible) {
-    if (state.soil.layer) state.map.removeLayer(state.soil.layer);
-    if (state.raster.pixels) paintRaster();
+function clearSoilLayer() {
+  state.soil.token += 1;
+  if (state.soil.layer) {
+    state.map.removeLayer(state.soil.layer);
+    state.soil.layer = null;
+  }
+}
+
+async function loadFieldSoils(fieldId, token, signal) {
+  clearSoilLayer();
+  const soilToken = state.soil.token;
+  const stale = () => token !== state.selectionToken || soilToken !== state.soil.token;
+
+  state.soil.data = null;
+  setSoilStatus("Loading SSURGO polygons…", "loading");
+
+  let data;
+  try {
+    const res = await fetch(
+      `/api/soils.geojson?field_id=${encodeURIComponent(fieldId)}`, { signal });
+    if (!res.ok) throw new Error(`request failed (${res.status})`);
+    data = await res.json();
+  } catch (err) {
+    if (isAbort(err) || stale()) return;
+    setSoilStatus(`SSURGO failed: ${err.message}`, "error");
     return;
   }
-  if (!state.soil.data) {
-    el("statusline").textContent = "Loading SSURGO soil map units…";
-    try {
-      state.soil.data = await fetch("/api/soils.geojson").then((r) => r.json());
-    } catch (err) {
-      el("statusline").textContent = `Soil layer failed: ${err.message}`;
-      el("soiltoggle").checked = false;
-      state.soil.visible = false;
-      return;
-    }
-    state.soil.layer = L.geoJSON(state.soil.data, {
-      pane: "soilPane",
-      renderer: L.canvas({ pane: "soilPane" }),
-      style: styleSoil,
-      onEachFeature(feature, lyr) {
-        const p = feature.properties;
-        lyr.bindTooltip(`${p.musym} · ${p.muname}`,
-                        { sticky: true, className: "leaflet-tooltip" });
-        lyr.bindPopup(soilPopup(p), { maxWidth: 320 });
-        lyr.on("click", (event) => {
-          const fieldId = fieldAt(event.latlng);
-          if (fieldId) selectField(fieldId);
-        });
-        lyr.on("mouseover", () => lyr.setStyle({ weight: 2, color: "#1f160c" }));
-        lyr.on("mouseout", () => lyr.setStyle(styleSoil(feature)));
-      },
-    });
-    el("statusline").textContent =
-      `${state.soil.data.features.length.toLocaleString()} SSURGO map-unit polygons`;
-    setTimeout(renderStatus, 1800);
+  if (stale()) return;
+
+  const features = data.features || [];
+  if (!features.length) {
+    setSoilStatus("No SSURGO polygons for this field.");
+    return;
   }
-  state.soil.layer.addTo(state.map);
-  if (state.raster.pixels) paintRaster();
+
+  features.forEach((f) => {
+    if (!f._bbox) f._bbox = FieldGeo.bboxOf(f.geometry);
+  });
+  state.soil.data = data;
+  state.soil.layer = L.geoJSON(data, {
+    pane: "soilPane",
+    interactive: false,
+    style: styleSoil,
+  }).addTo(state.map);
+
+  const units = data.map_units || [];
+  const coverage = data.coverage_pct == null
+    ? "" : ` · ${Number(data.coverage_pct).toFixed(1)}% covered`;
+  setSoilStatus(
+    `${features.length} polygons · ${units.length} map units${coverage}`
+    + " · click a polygon for attributes");
+}
+
+/* ------------------------------------------------------------------ */
+/* County raster metadata + compute job                                */
+/* ------------------------------------------------------------------ */
+async function loadRasterMeta() {
+  const token = (state.rasterToken += 1);
+  const { year, period } = state;
+  el("statusline").textContent = "Loading 10 m composite…";
+  el("compute").classList.add("d-none");
+
+  let info;
+  try {
+    info = await fetch(`/api/ndvi-raster?year=${year}&period=${period}`)
+      .then((r) => r.json());
+  } catch (err) {
+    if (token !== state.rasterToken) return;
+    el("statusline").textContent = `Raster request failed: ${err.message}`;
+    return;
+  }
+  if (token !== state.rasterToken) return;
+
+  state.rasterMeta = info;
+  renderRasterStatus();
+  updateLegend();
+  updateFieldStretchOption();
+
+  if (state.selected) {
+    if (state.ndvi.visible) {
+      loadFieldNdvi(state.selected, state.selectionToken,
+        state.selectionAbort ? state.selectionAbort.signal : undefined);
+    } else {
+      setPixelStatsMessage("NDVI layer is hidden.");
+    }
+  }
+}
+
+function renderRasterStatus() {
+  const info = state.rasterMeta;
+  if (!info || info.status === "not_computed") {
+    el("statusline").innerHTML =
+      `<b>${state.year}</b> P${String(state.period).padStart(2, "0")} has no 10 m composite yet.`;
+    el("compute").classList.remove("d-none");
+    return;
+  }
+  if (info.status === "empty") {
+    el("statusline").innerHTML =
+      "No clear Sentinel-2 pixels for this period. Nothing is filled in.";
+    el("compute").classList.add("d-none");
+    return;
+  }
+  const s = info.stats || {};
+  el("statusline").innerHTML =
+    `<b>10 m composite</b> · ${Number(s.pixels || 0).toLocaleString()} px`
+    + ` · ${info.n_dates || 0} dates · county mean <b>${fmt(s.mean, 3)}</b>`;
+  el("compute").classList.add("d-none");
+}
+
+async function pollJob() {
+  const res = await fetch("/api/job");
+  const job = await res.json();
+  state.job = job;
+  if (job.state === "running") {
+    const pct = job.total ? Math.round((job.done / job.total) * 100) : 5;
+    el("jobwrap").classList.remove("d-none");
+    el("jobbar").style.width = `${Math.max(pct, 5)}%`;
+    el("jobnote").classList.remove("d-none");
+    el("jobnote").textContent = job.message || "processing…";
+    state.polling = setTimeout(pollJob, 1500);
+    return;
+  }
+  el("jobwrap").classList.add("d-none");
+  el("jobnote").classList.add("d-none");
+  state.polling = null;
+  if (job.state === "done" && job.kind === "raster") {
+    await loadRasterMeta();
+  } else if (job.state === "error") {
+    el("statusline").textContent = `Computation failed: ${job.error}`;
+    el("compute").classList.remove("d-none");
+  }
+}
+
+async function startCompute() {
+  const res = await fetch(`/api/compute-raster/${state.year}/${state.period}`,
+    { method: "POST" });
+  const body = await res.json();
+  if (!body.ok) {
+    el("jobnote").classList.remove("d-none");
+    el("jobnote").textContent = body.error || "could not start";
+    return;
+  }
+  el("compute").classList.add("d-none");
+  el("jobwrap").classList.remove("d-none");
+  el("jobbar").style.width = "5%";
+  el("jobnote").classList.remove("d-none");
+  el("jobnote").textContent = "starting…";
+  pollJob();
 }
 
 /* ------------------------------------------------------------------ */
 /* Field detail                                                        */
 /* ------------------------------------------------------------------ */
-async function selectField(fieldId) {
-  state.selected = fieldId;
-  const res = await fetch(`/api/field/${encodeURIComponent(fieldId)}`);
-  if (!res.ok) return;
-  const d = await res.json();
-  renderDetail(d);
-  const lyr = state.layers[fieldId];
-  if (lyr && lyr.bringToFront) lyr.bringToFront();
-  refreshSelectedStats();
+function showDetailLoading(feature) {
+  const p = feature.properties;
+  el("detail").classList.remove("d-none");
+  el("d-error").classList.add("d-none");
+  el("d-id").textContent = p.field_id;
+  el("d-acres").textContent = `${Number(p.acres).toFixed(2)} ac`;
+  el("d-class").textContent = p.ag_class === "crop"
+    ? "crop field" : String(p.ag_class || "—").replace(/_/g, " ");
+  el("d-crop").textContent = p.crop_name || "no CDL class";
+  el("d-crop").className = "chip neutral";
+  el("d-pixstats").innerHTML = `<span class="muted">Loading 10 m NDVI…</span>`;
+  el("d-soilname").textContent = "Loading soil summary…";
+  el("d-soilprops").innerHTML = "";
+  el("d-units").innerHTML = "";
+  el("d-croprows").innerHTML =
+    `<tr><td colspan="3" class="text-muted">Loading crop history…</td></tr>`;
+  el("chartnote").textContent = "Loading field-average NDVI…";
+  if (state.chart) {
+    state.chart.destroy();
+    state.chart = null;
+  }
+}
+
+function showDetailError(message) {
+  const node = el("d-error");
+  node.textContent = `Field detail unavailable: ${message}`;
+  node.classList.remove("d-none");
+}
+
+async function loadFieldDetail(fieldId, token, signal) {
+  let detail;
+  try {
+    const res = await fetch(`/api/field/${encodeURIComponent(fieldId)}`, { signal });
+    if (!res.ok) throw new Error(`request failed (${res.status})`);
+    detail = await res.json();
+  } catch (err) {
+    if (isAbort(err) || token !== state.selectionToken) return;
+    showDetailError(err.message);
+    return;
+  }
+  if (token !== state.selectionToken) return;
+  renderDetail(detail);
 }
 
 function renderDetail(d) {
-  el("detail").classList.remove("d-none");
+  el("d-error").classList.add("d-none");
   el("d-id").textContent = d.field_id;
   el("d-acres").textContent = `${d.acres.toFixed(2)} ac`;
-  el("d-class").textContent = d.ag_class === "crop" ? "crop field" : d.ag_class.replace(/_/g, " ");
+  el("d-class").textContent = d.ag_class === "crop"
+    ? "crop field" : d.ag_class.replace(/_/g, " ");
   el("d-crop").textContent = d.crop_name || "no CDL class";
   el("d-crop").className = "chip neutral";
 
-  const p = d.soils.properties;
-  el("d-soilname").textContent =
-    `${d.soils.dominant} (${d.soils.n_units} map unit${d.soils.n_units === 1 ? "" : "s"})`;
+  const soils = d.soils || {};
+  const p = soils.properties || {};
+  el("d-soilname").textContent = soils.dominant
+    ? `${soils.dominant} (${soils.n_units} map unit${soils.n_units === 1 ? "" : "s"})`
+    : "No SSURGO summary for this field.";
   const v = (x, suffix = "") => (x == null ? "—" : `${x}${suffix}`);
   el("d-soilprops").innerHTML = [
     ["Organic matter", v(p.top_om_r, " %")],
@@ -497,76 +823,35 @@ function renderDetail(d) {
     ["pH", v(p.top_ph1to1h2o_r)],
     ["Clay", v(p.top_claytotal_r, " %")],
     ["Sand", v(p.top_sandtotal_r, " %")],
-  ].map(([k, val]) => `<div>${k} <b>${val}</b></div>`).join("");
+  ].map(([k, val]) => `<div>${k} <b>${esc(val)}</b></div>`).join("");
 
-  el("d-units").innerHTML = d.soils.units
-    .map((u) => `<span title="${u.muname}">${u.musym}${u.comppct == null ? "" : ` ${u.comppct}%`}</span>`)
-    .join("");
+  const units = soils.units || [];
+  el("d-units").innerHTML = units.length
+    ? units.map((u) => `<span title="${esc(u.muname)}">${esc(u.musym)}${
+        u.comppct == null ? "" : ` ${esc(u.comppct)}%`}</span>`).join("")
+    : `<span class="muted">No map units listed.</span>`;
 
-  const rows = d.crop_history.length
-    ? d.crop_history.map((c) =>
-        `<tr><td>${c.year}</td><td>${c.crop_name}</td><td class="text-end">${
+  const history = d.crop_history || [];
+  el("d-croprows").innerHTML = history.length
+    ? history.map((c) =>
+        `<tr><td>${c.year}</td><td>${esc(c.crop_name)}</td><td class="text-end">${
           c.crop_pct == null ? "—" : c.crop_pct.toFixed(1)}</td></tr>`).join("")
     : `<tr><td colspan="3" class="text-muted">No CDL history for this field.</td></tr>`;
-  el("d-croprows").innerHTML = rows;
 
   drawChart(d);
-}
-
-async function refreshSelectedStats() {
-  if (!state.selected) return;
-  const { year, period } = state;
-  const res = await fetch(
-    `/api/field-raster-stats?year=${year}&period=${period}&field_id=${encodeURIComponent(state.selected)}`
-  );
-  const s = await res.json();
-  if (state.selected == null) return;
-  state.selectedStats = s;
-  renderPixelStats(s);
-  updateFieldStretchOption();
-  if (state.scale.stretch === "field") {
-    updateLegend();
-    paintRaster();
-  }
-}
-
-function renderPixelStats(s) {
-  const box = el("d-pixstats");
-  if (!s || s.status === "not_computed") {
-    box.innerHTML = `<span class="muted">No 10 m composite for ${state.year} P${String(state.period).padStart(2, "0")}.</span>`;
-    return;
-  }
-  if (s.status === "no_pixels") {
-    box.innerHTML = `<span class="muted">No clear pixels inside this field for this period.</span>`;
-    return;
-  }
-  box.innerHTML = `
-    <div class="pixgrid">
-      <div>pixels <b>${s.pixels.toLocaleString()}</b></div>
-      <div>min <b>${fmt(s.min, 3)}</b></div>
-      <div>max <b>${fmt(s.max, 3)}</b></div>
-      <div>mean <b>${fmt(s.mean, 3)}</b></div>
-      <div>std <b>${fmt(s.std, 3)}</b></div>
-      <div>p02–p98 <b>${fmt(s.p02, 2)}–${fmt(s.p98, 2)}</b></div>
-    </div>`;
-}
-
-function updateFieldStretchOption() {
-  const opt = el("stretch").querySelector('option[value="field"]');
-  const ready = state.selectedStats && state.selectedStats.status === "ready";
-  opt.disabled = !ready;
-  opt.textContent = ready ? "Selected field 2–98 %" : "Selected field (pick a field)";
 }
 
 /* ------------------------------------------------------------------ */
 /* Chart (field-average NDVI)                                          */
 /* ------------------------------------------------------------------ */
 function drawChart(d) {
+  if (!state.meta) return;
   const labels = state.meta.periods.map((p) => p.label.replace(" - ", "–"));
   const years = [2020, 2021, 2022, 2023, 2024, 2025, 2026];
+  const values = (d.ndvi && d.ndvi.values) || {};
   const datasets = years.map((y) => ({
     label: String(y),
-    data: d.ndvi.values[y],
+    data: values[y] || [],
     borderColor: YEAR_COLORS[y],
     backgroundColor: YEAR_COLORS[y],
     borderWidth: y === state.year ? 3 : 1.2,
@@ -601,7 +886,7 @@ function drawChart(d) {
     },
   });
 
-  const any = years.some((y) => (d.ndvi.values[y] || []).some((v) => v != null));
+  const any = years.some((y) => (values[y] || []).some((v) => v != null));
   el("chartnote").textContent = any
     ? "Field-average biweekly NDVI. Empty periods had no usable imagery."
     : "No field-average NDVI for this field (outside the crop layer or below one pixel).";
@@ -618,53 +903,51 @@ function refreshChartHighlight() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Jobs                                                                */
-/* ------------------------------------------------------------------ */
-async function pollJob() {
-  const res = await fetch("/api/job");
-  const job = await res.json();
-  state.job = job;
-  if (job.state === "running") {
-    const pct = job.total ? Math.round((job.done / job.total) * 100) : 5;
-    el("jobwrap").classList.remove("d-none");
-    el("jobbar").style.width = `${Math.max(pct, 5)}%`;
-    el("jobnote").classList.remove("d-none");
-    el("jobnote").textContent = job.message || "processing…";
-    state.polling = setTimeout(pollJob, 1500);
-    return;
-  }
-  el("jobwrap").classList.add("d-none");
-  el("jobnote").classList.add("d-none");
-  state.polling = null;
-  if (job.state === "done" && job.kind === "raster") await loadRaster();
-  else if (job.state === "error") {
-    el("statusline").textContent = `Computation failed: ${job.error}`;
-    el("compute").classList.remove("d-none");
-  }
-}
-
-async function startCompute() {
-  const res = await fetch(`/api/compute-raster/${state.year}/${state.period}`, { method: "POST" });
-  const body = await res.json();
-  if (!body.ok) {
-    el("jobnote").classList.remove("d-none");
-    el("jobnote").textContent = body.error || "could not start";
-    return;
-  }
-  el("compute").classList.add("d-none");
-  el("jobwrap").classList.remove("d-none");
-  el("jobbar").style.width = "5%";
-  el("jobnote").classList.remove("d-none");
-  el("jobnote").textContent = "starting…";
-  pollJob();
-}
-
-/* ------------------------------------------------------------------ */
 /* Controls                                                            */
 /* ------------------------------------------------------------------ */
 function setPeriodLabel() {
   const p = state.meta.periods[state.period - 1];
+  if (!p) return;
   el("period-label").textContent = `P${String(state.period).padStart(2, "0")} · ${p.label}`;
+}
+
+function toggleNdvi(visible) {
+  state.ndvi.visible = visible;
+  if (!state.selected) {
+    setNdviStatus(visible
+      ? "Select a field to view 10 m NDVI." : "NDVI hidden.");
+    return;
+  }
+  if (!visible) {
+    clearNdviOverlay();
+    state.ndvi.info = null;
+    setNdviStatus("NDVI hidden.");
+    setPixelStatsMessage("NDVI layer is hidden.");
+    updateFieldStretchOption();
+    updateLegend();
+    return;
+  }
+  setNdviStatus("Loading 10 m NDVI…", "loading");
+  loadFieldNdvi(state.selected, state.selectionToken,
+    state.selectionAbort ? state.selectionAbort.signal : undefined);
+}
+
+function toggleSoils(visible) {
+  state.soil.visible = visible;
+  if (!state.selected) {
+    setSoilStatus(visible
+      ? "Select a field to view SSURGO soils." : "SSURGO hidden.");
+    return;
+  }
+  if (!visible) {
+    clearSoilLayer();
+    state.soil.data = null;
+    setSoilStatus("SSURGO hidden.");
+    return;
+  }
+  setSoilStatus("Loading SSURGO polygons…", "loading");
+  loadFieldSoils(state.selected, state.selectionToken,
+    state.selectionAbort ? state.selectionAbort.signal : undefined);
 }
 
 function bindControls() {
@@ -679,8 +962,8 @@ function bindControls() {
   yearSelect.addEventListener("change", () => {
     state.year = Number(yearSelect.value);
     setPeriodLabel();
-    loadRaster();
     refreshChartHighlight();
+    loadRasterMeta();
   });
 
   const slider = el("period");
@@ -689,7 +972,7 @@ function bindControls() {
   slider.addEventListener("input", () => {
     state.period = Number(slider.value);
     setPeriodLabel();
-    loadRaster();
+    loadRasterMeta();
   });
 
   el("play").addEventListener("click", () => {
@@ -704,21 +987,21 @@ function bindControls() {
       state.period = (state.period % state.meta.periods.length) + 1;
       slider.value = state.period;
       setPeriodLabel();
-      loadRaster();
+      loadRasterMeta();
     }, 2600);
   });
 
   el("ramp").addEventListener("change", (event) => {
     state.scale.ramp = event.target.value;
     updateLegend();
-    paintRaster();
+    paintNdvi();
   });
 
   el("stretch").addEventListener("change", (event) => {
     state.scale.stretch = event.target.value;
     el("manualwrap").classList.toggle("d-none", state.scale.stretch !== "manual");
     updateLegend();
-    paintRaster();
+    paintNdvi();
   });
 
   ["minval", "maxval"].forEach((id) => {
@@ -727,23 +1010,17 @@ function bindControls() {
       el("stretch").value = "manual";
       el("manualwrap").classList.remove("d-none");
       updateLegend();
-      paintRaster();
+      paintNdvi();
     });
   });
 
+  el("ndvitoggle").addEventListener("change", (event) => toggleNdvi(event.target.checked));
   el("soiltoggle").addEventListener("change", (event) => toggleSoils(event.target.checked));
   el("compute").addEventListener("click", startCompute);
-  el("close-detail").addEventListener("click", () => {
-    el("detail").classList.add("d-none");
-    state.selected = null;
-    state.selectedStats = null;
-    updateFieldStretchOption();
-    if (state.scale.stretch === "field") {
-      state.scale.stretch = "fixed";
-      el("stretch").value = "fixed";
-      updateLegend();
-      paintRaster();
-    }
+  el("close-detail").addEventListener("click", clearSelection);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") clearSelection();
   });
 }
 
@@ -778,7 +1055,10 @@ async function init() {
   el("period").value = state.period;
   setPeriodLabel();
   updateLegend();
-  await loadRaster();
+  setTogglesEnabled(false);
+  setNdviStatus("Select a field to view 10 m NDVI.");
+  setSoilStatus("Select a field to view SSURGO soils.");
+  await loadRasterMeta();
 
   const job = await fetch("/api/job").then((r) => r.json());
   if (job.state === "running") pollJob();

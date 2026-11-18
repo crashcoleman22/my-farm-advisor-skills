@@ -63,8 +63,18 @@ class Settings:
         return self.cache_dir / "ndvi_raster"
 
     @property
+    def field_raster_cache(self) -> Path:
+        """Per-field NDVI crops from the cached composite (never in the repo)."""
+        return self.cache_dir / "ndvi_field"
+
+    @property
     def soil_cache(self) -> Path:
         return self.cache_dir / "soil_map_units.geojson"
+
+    @property
+    def field_soil_cache(self) -> Path:
+        """Per-field SSURGO clips derived from the cached county layer."""
+        return self.cache_dir / "soil_by_field"
 
     @property
     def soil_provenance(self) -> Path:

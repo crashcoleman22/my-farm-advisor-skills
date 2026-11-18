@@ -52,8 +52,14 @@ PYTHONPATH=src ... -m indiana_field_explorer soils
 ## Local validation
 
 - `python -m compileall src/indiana_field_explorer` for syntax.
-- `node --check web/app.js` for the browser bundle.
+- `node --check web/geo.js` and `node --check web/app.js` for the browser bundle.
 - `curl -s localhost:8420/healthz` and `/api/meta` after starting the server.
-- Check `/api/ndvi-raster` and `/api/field-raster-stats` for a computed period.
-- Check one field's `/api/field/<id>` for soils, crops, and NDVI series.
+- Verify field selection first with `web/geo.js`: every field's representative
+  point must resolve back to that field, and the 486-acre test field
+  `181623000957517` plus neighbor `181623000957518` must resolve exactly.
+- Check `/api/field-ndvi?field_id=...&year=2025&period=10` and
+  `/api/field-ndvi.png?...` for one field; the PNG must be masked to the field
+  and `stats` must match `/api/field-raster-stats`.
+- Check `/api/soils.geojson?field_id=...` returns only that field's polygons.
+- Check `/api/field/<id>` for soils, crops, and the NDVI series.
 - Run `./scripts/validate.sh` from the repository root after structural changes.

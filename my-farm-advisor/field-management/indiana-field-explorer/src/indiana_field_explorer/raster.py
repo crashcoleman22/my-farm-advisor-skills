@@ -154,6 +154,67 @@ def read_geotiff(path: Path) -> np.ndarray:
     return np.where(scaled == nodata, np.nan, scaled.astype(np.float32) / SCALE)
 
 
+def field_crop_3857(tif_path: Path, geometry_3857, latitude: float) -> dict | None:
+    """Crop one field out of the cached UTM composite onto a Web Mercator grid.
+
+    The composite lives on an EPSG:32616 grid, which is rotated relative to Web
+    Mercator. Warping the crop to EPSG:3857 before handing it to Leaflet removes
+    that rotation (the previous countywide image overlay was off by up to ~500 m
+    and a UTM crop by up to ~30 m).
+
+    Resolution is ``10 / cos(latitude)`` so the ground sample distance stays at
+    the native 10 m. Nearest resampling is deliberate: no interpolated NDVI.
+    Pixels outside the field polygon are masked to NaN and stay transparent.
+    """
+    import math
+
+    from rasterio.features import geometry_mask
+    from rasterio.transform import from_origin
+
+    geometry_3857 = geometry_3857.buffer(0)
+    minx, miny, maxx, maxy = geometry_3857.bounds
+    if not all(np.isfinite([minx, miny, maxx, maxy])) or maxx <= minx or maxy <= miny:
+        return None
+
+    resolution = 10.0 / max(math.cos(math.radians(latitude)), 1e-6)
+    width = max(1, int(math.ceil((maxx - minx) / resolution)))
+    height = max(1, int(math.ceil((maxy - miny) / resolution)))
+    if width * height > 8_000_000:  # refuse pathological allocations
+        return None
+
+    transform = from_origin(minx, maxy, resolution, resolution)
+    destination = np.full((height, width), np.nan, dtype=np.float32)
+
+    with rasterio.open(tif_path) as src:
+        band = src.read(1)
+        nodata = src.nodata if src.nodata is not None else NODATA
+        source = np.where(band == nodata, np.nan, band.astype(np.float32) / SCALE)
+        reproject(
+            source=source, destination=destination,
+            src_transform=src.transform, src_crs=src.crs,
+            dst_transform=transform, dst_crs="EPSG:3857",
+            resampling=Resampling.nearest,
+            src_nodata=np.nan, dst_nodata=np.nan,
+        )
+
+    inside = geometry_mask([geometry_3857], out_shape=(height, width),
+                           transform=transform, invert=True)
+    destination[~inside] = np.nan
+    valid = destination[np.isfinite(destination)]
+    if valid.size == 0:
+        return None
+
+    return {
+        "ndvi": destination,
+        "transform": transform,
+        "bounds": (minx, miny, maxx, maxy),
+        "resolution_m": resolution,
+        "width": width,
+        "height": height,
+        "valid_pixels": int(valid.size),
+    }
+
+
 # ----------------------------------------------------------------------
 # PNG encode / serve side
 # ----------------------------------------------------------------------

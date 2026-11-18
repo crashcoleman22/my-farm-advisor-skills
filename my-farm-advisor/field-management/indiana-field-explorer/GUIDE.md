@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires Python 3.11+ with geopandas, numpy, pandas, pyarrow, rasterio, requests. Reads a completed indiana-field-discovery runtime; imagery and soil geometry are fetched only for the requested period.
 metadata:
   author: Boreal Bytes
-  version: "1.1.0"
+  version: "1.2.0"
   category: geospatial
   tags: [indiana, johnson-county, explorer, ndvi, sentinel-2, ssurgo, cdl, leaflet]
 ---
@@ -26,16 +26,23 @@ imagery is read as remote COG windows for one biweekly window at a time.
 ## What it shows
 
 - Every field boundary in the county (3,787 polygons; 3,293 classified as crop).
-- **Per-pixel NDVI at native 10 m resolution** for the selected biweekly period.
-  Each pixel is the mean of clear observations in that window, so within-field
-  variability is preserved instead of one average color per field.
+- **Selection-driven field view.** Click a field (or its outline) to highlight it,
+  zoom to it, and load only that field's overlays. Click another field to switch,
+  or press `Esc` / the ✕ to clear.
+- **Per-pixel NDVI at native 10 m resolution** for the selected biweekly period
+  and **selected field only**. Each pixel is the mean of clear observations in
+  that window, so within-field variability is preserved instead of one average
+  color per field. Pixels outside the field stay transparent.
 - Year selection for 2020–2026 and a biweekly timeline slider with play/pause.
-- Adjustable NDVI color ramp and stretch: fixed −0.2…1.0, automatic 2–98 %,
-  manual bounds, and a **field-relative 2–98 %** stretch for the selected field.
+- Adjustable NDVI color ramp and stretch: fixed −0.2…1.0, manual bounds, and a
+  **field-relative 2–98 %** stretch computed from the selected field.
 - An NDVI legend that prints the numeric values of the active scale.
+- An independent **NDVI toggle** and **SSURGO toggle**. Both are disabled until a
+  field is selected and report loading, hidden, unavailable, and error states.
 - A toggleable **SSURGO soil map-unit layer** showing real MUPOLYGON boundaries
-  over the imagery; click a polygon for its symbol, name, drainage class,
-  hydrologic group, slope, available water capacity, water table, and flood class.
+  clipped to the selected field; click a polygon for its symbol, name, drainage
+  class, hydrologic group, slope, available water capacity, water table, and
+  flood class without changing the selected field.
 - Click a field for acreage, soil summary, crop history, pixel statistics
   (min/max/mean/std), and a multi-year field-average NDVI trend chart.
 - No cloud statistics and no cloud layers: masking happens before compositing.
@@ -89,9 +96,12 @@ flow; open the URL in a browser with a Coder session to see the app.
 
 ## 10 m NDVI raster composites
 
-The map loads `/api/ndvi-raster` for the selected `(year, period)`. If the
-composite is not cached, the **Compute 10 m NDVI for this period** button starts
-a background job that:
+The county composite is still built for the selected `(year, period)`, but the map
+no longer drapes the whole county raster. On selection the browser calls
+`/api/field-ndvi` for one field; the server crops the cached composite, warps it
+to EPSG:3857, masks it to the field polygon, and serves a small PNG. If the
+composite is not cached, the **Compute 10 m NDVI for this period** button starts a
+background job that:
 
 1. searches Sentinel-2 L2A STAC items for the 14-day window,
 2. keeps one best item per acquisition date,
@@ -100,7 +110,7 @@ a background job that:
    cirrus, snow) and invalid reflectance,
 5. averages every clear observation per pixel.
 
-The result is cached as a compressed GeoTIFF plus a grayscale+alpha PNG:
+The county result is cached as a compressed GeoTIFF plus a grayscale+alpha PNG:
 
 ```
 $INDIANA_RUNTIME_ROOT/state/explorer/ndvi_raster/<year>/P<nn>.tif
@@ -108,9 +118,25 @@ $INDIANA_RUNTIME_ROOT/state/explorer/ndvi_raster/<year>/P<nn>.png
 $INDIANA_RUNTIME_ROOT/state/explorer/ndvi_raster/<year>/P<nn>.json
 ```
 
-The PNG stores NDVI over the fixed encoding domain −0.2…1.0 in the gray channel
-and validity in alpha. The browser decodes it once and recolors a canvas locally,
-so changing ramp or stretch never refetches imagery and never invents values.
+Per-field display crops are cached separately and are derived from the GeoTIFF,
+never re-downloaded:
+
+```
+$INDIANA_RUNTIME_ROOT/state/explorer/ndvi_field/<year>/P<nn>/<field_id>.png
+$INDIANA_RUNTIME_ROOT/state/explorer/ndvi_field/<year>/P<nn>/<field_id>.json
+```
+
+The crop uses `10 / cos(latitude)` metres so the ground sample distance stays at
+10 m while the image grid is axis-aligned in Web Mercator. Nearest resampling is
+deliberate: no interpolated NDVI. Pixels outside the field are transparent. This
+replaces an earlier countywide image overlay that was misaligned by up to ~500 m
+because a UTM grid is rotated relative to Web Mercator.
+
+Both PNGs store NDVI over the fixed encoding domain −0.2…1.0 in the gray channel
+and validity in alpha. The browser decodes the field PNG once and recolors a
+canvas locally, so changing ramp or stretch never refetches imagery and never
+invents values. The CSS uses `image-rendering: pixelated` so 10 m cells stay
+crisp when zoomed to a field.
 
 Pre-compute periods ahead of time:
 
@@ -123,12 +149,15 @@ Computation is idempotent; an existing cache is reused.
 
 ### Field pixel statistics
 
-`/api/field-raster-stats` clips the cached 10 m raster to one field polygon and
-returns real pixel counts and statistics. Example (2025 P10, Johnson County):
+`/api/field-ndvi` also returns the **exact** statistics from the UTM mask (the
+same numbers as `/api/field-raster-stats`), while the displayed Web Mercator crop
+reports its own `crop_stats` only as a sanity check. Example (2025 P10, Johnson
+County):
 
 ```
 field 181623000957517, 486 ac
 pixels 19,697 · min 0.064 · max 0.940 · mean 0.881 · std 0.074
+display crop 122 × 206 px, ~13 KB PNG, 19,765 valid cells
 ```
 
 The pixel count equals the field's pixel count in the shared field-index raster,
@@ -140,8 +169,8 @@ which is how alignment with the field boundaries is verified.
 
 The discovery pipeline stores tabular map-unit membership only. For the map
 layer, `soils_layer.py` fetches the matching `MUPOLYGON` features for the
-county's 88 map units from the IndianaMap hosted SSURGO service (NRCS data),
-clips them to the field footprints, simplifies them to 2 m, and caches:
+county's map units from the IndianaMap hosted SSURGO service (NRCS data), clips
+them to the field footprints, simplifies them, and caches:
 
 ```
 $INDIANA_RUNTIME_ROOT/state/explorer/soil_map_units.geojson
@@ -154,10 +183,28 @@ Rebuild the cache at any time:
 PYTHONPATH=src python -m indiana_field_explorer soils
 ```
 
-Polygons are drawn in their own pane above the imagery and below field outlines.
+The browser never downloads the ~21 MB county GeoJSON. `/api/soils.geojson`
+without a `field_id` still serves it for tooling, but the map calls
+`/api/soils.geojson?field_id=...`. The server loads the county cache once into a
+GeoDataFrame with a spatial index, clips to the selected field, and caches:
+
+```
+$INDIANA_RUNTIME_ROOT/state/explorer/soil_by_field/<field_id>.geojson
+```
+
+A typical field returns 5–60 polygons instead of 11,340. Polygons are
+non-interactive and drawn in their own pane above the NDVI crop and below field
+outlines, so field outlines remain visible and clickable. Clicking inside the
+selected field opens a soil attribute popup without changing the selection.
+
 The layer carries `mukey`, `musym`, `muname`, `drclassdcd`, `hydgrpdcd`,
 `slopegradwta`, `aws050wta`, `wtdepannmin`, and `flodfreqdcd`. Component-weighted
 topsoil attributes remain available per field through `/api/field/<id>`.
+
+New soil cache builds simplify at 0.5 m and keep polygons down to 5 m² so small
+map-unit slivers are not silently dropped. Existing caches built with the older
+2 m / 40 m² settings remain valid; rebuild explicitly if those slivers matter.
+Per-field clipping removes any area outside the field regardless of cache age.
 
 ---
 
@@ -194,7 +241,9 @@ both views.
 | Daily NDVI | `<farm>/derived/ndvi/field_ndvi_daily.parquet` |
 | 2020 chart cache | `state/explorer/ndvi_biweekly/2020/P*.parquet` |
 | NDVI raster cache | `state/explorer/ndvi_raster/<year>/P*` |
+| Per-field NDVI crops | `state/explorer/ndvi_field/<year>/P<nn>/<field_id>.*` |
 | Soil polygons | `state/explorer/soil_map_units.geojson` |
+| Per-field soil clips | `state/explorer/soil_by_field/<field_id>.geojson` |
 | Simplified fields | `state/explorer/fields_simplified.geojson` |
 | Field index grid | `state/explorer/field_index/` |
 
@@ -207,11 +256,14 @@ both views.
 | --- | --- |
 | `GET /api/meta` | County totals, years, and the 15 period definitions |
 | `GET /api/fields.geojson` | Simplified boundaries with acreage and class |
-| `GET /api/ndvi-raster?year=&period=` | Raster metadata, bounds, stats |
-| `GET /api/ndvi-raster.png?year=&period=` | Georeferenced gray8+alpha8 NDVI image |
+| `GET /api/ndvi-raster?year=&period=` | County composite metadata, bounds, stats |
+| `GET /api/ndvi-raster.png?year=&period=` | County gray8+alpha8 NDVI image (tooling) |
+| `GET /api/field-ndvi?year=&period=&field_id=` | Per-field crop metadata, Web Mercator bounds, exact stats |
+| `GET /api/field-ndvi.png?year=&period=&field_id=` | Per-field NDVI crop, masked to the field |
 | `GET /api/field-raster-stats?year=&period=&field_id=` | Pixel min/max/mean/std |
 | `GET /api/rasters` | Cached raster periods |
-| `GET /api/soils.geojson` | SSURGO map-unit polygons |
+| `GET /api/soils.geojson` | County SSURGO map-unit polygons (tooling) |
+| `GET /api/soils.geojson?field_id=` | SSURGO polygons clipped to one field |
 | `GET /api/ndvi?year=&period=` | Field-average values (chart API) |
 | `GET /api/field/<field_id>` | Acreage, soils, crop history, NDVI series |
 | `GET /api/job` | Current compute job state |
@@ -228,9 +280,14 @@ both views.
   transparent and are never interpolated.
 - The PNG encoding clips display colors outside −0.2…1.0, but reported statistics
   and the cached GeoTIFF keep the actual values.
+- The Web Mercator display crop is resampled with nearest-neighbour to ~13 m
+  cells (10 m on the ground). Panel statistics always come from the exact UTM
+  mask, so displayed min/max/mean/std do not change with the reprojection.
 - SCL cloud masking is conservative; a period with few clear dates yields sparse
   coverage (for example 2021 P4–P5 in the field-average series).
 - Soils are SSURGO map units from IndianaMap with NRCS attributes; tabular
   component-weighted topsoil summaries come from the discovery manifests.
+  `FdbA` has no source polygon for the test field, and two county fields have no
+  soil geometry at all; those show explicit unavailable states.
 - CDL history runs 2021–2025; unreleased years are absent rather than guessed.
 - The app is single-county and single-farm by design.

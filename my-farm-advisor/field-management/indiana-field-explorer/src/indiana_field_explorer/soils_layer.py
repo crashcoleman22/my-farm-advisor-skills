@@ -90,9 +90,9 @@ def build(cfg, fields: gpd.GeoDataFrame, progress=None) -> dict:
     if progress:
         progress("simplifying polygons", 2, 3)
     projected = clipped.to_crs(32616)
-    projected["geometry"] = projected.geometry.simplify(2.0, preserve_topology=True)
+    projected["geometry"] = projected.geometry.simplify(0.5, preserve_topology=True)
     projected["_area"] = projected.geometry.area
-    projected = projected[projected["_area"] >= 40.0].copy()
+    projected = projected[projected["_area"] >= 5.0].copy()
     clipped = projected.to_crs(4326)
 
     records = []
@@ -129,7 +129,8 @@ def build(cfg, fields: gpd.GeoDataFrame, progress=None) -> dict:
         "mukeys": len(mukeys),
         "features_downloaded": len(gdf),
         "features_after_clip": len(records),
-        "simplify_m": 2.0,
+        "simplify_m": 0.5,
+        "min_polygon_m2": 5.0,
         "note": ("MUPOLYGON geometry only; attributes also live in "
                  "manifests/field_soil_summary.csv and field_soil_map_units.csv."),
     }

@@ -19,7 +19,8 @@ class Handler(BaseHTTPRequestHandler):
     web_dir: str
 
     def log_message(self, fmt, *args):  # quieter default logging
-        if "/api/" in (args[0] if args else ""):
+        first = args[0] if args else ""
+        if "/api/" in str(first):
             return
         super().log_message(fmt, *args)
 
@@ -96,9 +97,36 @@ class Handler(BaseHTTPRequestHandler):
                 if stats is None:
                     return self._error(404, "unknown field_id")
                 return self._json(stats)
+            if path == "/api/field-ndvi":
+                field_id = query.get("field_id", [""])[0]
+                year = int(query.get("year", ["2021"])[0])
+                period = int(query.get("period", ["1"])[0])
+                if year not in (2020, 2021, 2022, 2023, 2024, 2025, 2026):
+                    return self._error(400, "year out of range")
+                if not 1 <= period <= 15:
+                    return self._error(400, "period out of range")
+                info = self.store.field_ndvi_info(field_id, year, period)
+                if info is None:
+                    return self._error(404, "unknown field_id")
+                return self._json(info)
+            if path == "/api/field-ndvi.png":
+                field_id = query.get("field_id", [""])[0]
+                year = int(query.get("year", ["2021"])[0])
+                period = int(query.get("period", ["1"])[0])
+                png = self.store.field_ndvi_png(field_id, year, period)
+                if png is None:
+                    return self._error(404, "no field NDVI crop for this period")
+                return self._send(200, png.read_bytes(), "image/png",
+                                  cache="public, max-age=3600")
             if path == "/api/rasters":
                 return self._json({"rasters": self.store.cached_rasters()})
             if path == "/api/soils.geojson":
+                field_id = query.get("field_id", [""])[0]
+                if field_id:
+                    payload = self.store.field_soils_geojson(field_id)
+                    if payload is None:
+                        return self._error(404, "unknown field_id")
+                    return self._json(payload, cache="public, max-age=3600")
                 return self._json(self.store.soils_geojson(),
                                   cache="public, max-age=3600")
             if path.startswith("/api/field/"):
@@ -149,7 +177,9 @@ class Handler(BaseHTTPRequestHandler):
         if not target.is_file():
             return self._error(404, "not found")
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-        cache = "no-cache" if target.name == "index.html" else "public, max-age=300"
+        # HTML/JS/CSS must revalidate so a stale bundle never masks a deploy.
+        cache = ("no-cache" if target.suffix in {".html", ".js", ".css"}
+                 else "public, max-age=300")
         self._send(200, target.read_bytes(), content_type, cache)
 
 

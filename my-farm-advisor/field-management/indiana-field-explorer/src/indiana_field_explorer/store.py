@@ -57,6 +57,10 @@ class Store:
         self._stamp_2020: float = 0.0
         self._lock = threading.Lock()
         self._soil_lock = threading.Lock()
+        self._field_raster_lock = threading.Lock()
+        self._field_soil_lock = threading.Lock()
+        self._soil_frame_lock = threading.Lock()
+        self._soil_gdf: gpd.GeoDataFrame | None = None
         self._job: dict | None = None
 
     # ------------------------------------------------------------------
@@ -500,8 +504,217 @@ class Store:
                 "period": period, **stats}
 
     # ------------------------------------------------------------------
+    # Per-field NDVI crops (Web Mercator, native ground resolution)
+    # ------------------------------------------------------------------
+    def field_ndvi_paths(self, field_id: str, year: int, period: int) -> tuple[Path, Path]:
+        base = self.cfg.field_raster_cache / str(year) / f"P{period:02d}"
+        return base / f"{field_id}.png", base / f"{field_id}.json"
+
+    def _field_ndvi_cached(self, png: Path, meta_path: Path, tif: Path) -> bool:
+        if not meta_path.exists() or meta_path.stat().st_mtime < tif.stat().st_mtime:
+            return False
+        try:
+            meta = raster.load_json(meta_path)
+        except (OSError, ValueError):
+            return False
+        return meta.get("status") != "ready" or png.exists()
+
+    def _build_field_ndvi(self, field_id: str, year: int, period: int) -> dict:
+        tif_path = self.raster_tif(year, period)
+        png_path, meta_path = self.field_ndvi_paths(field_id, year, period)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+
+        selected = self.fields[self.fields["field_id"] == field_id]
+        geometry_wgs = selected.to_crs(4326).geometry.iloc[0]
+        geometry_utm = selected.to_crs(32616).geometry.iloc[0]
+        geometry_merc = selected.to_crs(3857).geometry.iloc[0]
+        latitude = float(geometry_wgs.centroid.y)
+
+        crop = raster.field_crop_3857(tif_path, geometry_merc, latitude)
+        stats = raster.field_stats(tif_path, geometry_utm)
+
+        if crop is None or stats is None:
+            meta = {
+                "status": "no_pixels",
+                "field_id": field_id,
+                "year": year,
+                "period": period,
+                "reason": "no clear 10 m pixels inside this field for this period",
+            }
+        else:
+            raster.write_gray_alpha_png(png_path, crop["ndvi"])
+            from rasterio.warp import transform_bounds
+
+            left, bottom, right, top = transform_bounds(
+                "EPSG:3857", "EPSG:4326", *crop["bounds"])
+            dates: list[str] = []
+            county_meta = self.raster_json(year, period)
+            if county_meta.exists():
+                try:
+                    dates = list(raster.load_json(county_meta).get("dates") or [])
+                except (OSError, ValueError):
+                    dates = []
+            meta = {
+                "status": "ready",
+                "field_id": field_id,
+                "year": year,
+                "period": period,
+                "width": crop["width"],
+                "height": crop["height"],
+                "resolution_m": round(crop["resolution_m"], 2),
+                "ground_resolution_m": 10,
+                "crs": "EPSG:3857",
+                "bounds": [[bottom, left], [top, right]],
+                "bounds_3857": list(crop["bounds"]),
+                "dates": dates,
+                "n_dates": len(dates),
+                "method": ("cached 10 m UTM composite warped to Web Mercator with "
+                           "nearest resampling, masked to the field"),
+                "encoding": {"min": raster.NDVI_MIN, "max": raster.NDVI_MAX,
+                             "scheme": "gray8 alpha8"},
+                "stats": stats,
+                "crop_stats": raster.raster_stats(crop["ndvi"]),
+            }
+
+        tmp = meta_path.with_name(f"{meta_path.stem}.tmp.json")
+        tmp.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(meta_path)
+        return meta
+
+    def field_ndvi_info(self, field_id: str, year: int, period: int) -> dict | None:
+        if field_id not in self._by_id.index:
+            return None
+        tif_path = self.raster_tif(year, period)
+        if not tif_path.exists():
+            return {"status": "not_computed", "field_id": field_id,
+                    "year": year, "period": period}
+
+        png_path, meta_path = self.field_ndvi_paths(field_id, year, period)
+        if not self._field_ndvi_cached(png_path, meta_path, tif_path):
+            with self._field_raster_lock:
+                if not self._field_ndvi_cached(png_path, meta_path, tif_path):
+                    self._build_field_ndvi(field_id, year, period)
+
+        try:
+            payload = raster.load_json(meta_path)
+        except (OSError, ValueError):
+            return {"status": "error", "field_id": field_id,
+                    "year": year, "period": period,
+                    "error": "could not read cached field crop"}
+        payload["png_url"] = (f"/api/field-ndvi.png?field_id={field_id}"
+                              f"&year={year}&period={period}")
+        return payload
+
+    def field_ndvi_png(self, field_id: str, year: int, period: int) -> Path | None:
+        info = self.field_ndvi_info(field_id, year, period)
+        if info is None or info.get("status") != "ready":
+            return None
+        png_path, _ = self.field_ndvi_paths(field_id, year, period)
+        return png_path if png_path.exists() else None
+
+    # ------------------------------------------------------------------
     # SSURGO soil polygons
     # ------------------------------------------------------------------
+    def _soil_frame(self) -> gpd.GeoDataFrame:
+        """Load the cached county SSURGO layer once, with a spatial index."""
+        with self._soil_frame_lock:
+            if self._soil_gdf is None:
+                if not self.cfg.soil_cache.exists():
+                    with self._soil_lock:
+                        if not self.cfg.soil_cache.exists():
+                            soils_layer.build(self.cfg, self.fields)
+                frame = gpd.read_file(self.cfg.soil_cache)
+                if frame.crs is None:
+                    frame = frame.set_crs(4326)
+                frame = frame.to_crs(4326)
+                frame["geometry"] = frame.geometry.make_valid()
+                self._soil_gdf = frame
+            return self._soil_gdf
+
+    def field_soils_geojson(self, field_id: str) -> dict | None:
+        """SSURGO polygons clipped to one field, cached per field."""
+        if field_id not in self._by_id.index:
+            return None
+
+        out = self.cfg.field_soil_cache / f"{field_id}.geojson"
+        soil_mtime = (self.cfg.soil_cache.stat().st_mtime
+                      if self.cfg.soil_cache.exists() else 0.0)
+
+        def fresh() -> bool:
+            return out.exists() and out.stat().st_mtime >= soil_mtime
+
+        if fresh():
+            return json.loads(out.read_text(encoding="utf-8"))
+
+        with self._field_soil_lock:
+            if fresh():
+                return json.loads(out.read_text(encoding="utf-8"))
+            payload = self._build_field_soils(field_id)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_name(f"{out.stem}.tmp.geojson")
+            tmp.write_text(json.dumps(payload, separators=(",", ":")),
+                           encoding="utf-8")
+            tmp.replace(out)
+            return payload
+
+    def _build_field_soils(self, field_id: str) -> dict:
+        frame = self._soil_frame()
+        geometry = self.fields[self.fields["field_id"] == field_id] \
+            .to_crs(4326).geometry.iloc[0]
+
+        indices = frame.sindex.query(geometry, predicate="intersects")
+        candidates = frame.iloc[sorted(set(int(i) for i in indices))]
+        if candidates.empty:
+            clipped = candidates
+        else:
+            clipped = gpd.clip(candidates, gpd.GeoSeries([geometry], crs=4326))
+        clipped = clipped[clipped.geometry.notna() & ~clipped.geometry.is_empty].copy()
+        if not clipped.empty:
+            clipped["geometry"] = clipped.geometry.make_valid()
+
+        records = []
+        for row in clipped.itertuples(index=False):
+            def text(value):
+                return None if pd.isna(value) else value
+
+            def num(value):
+                return None if pd.isna(value) else round(float(value), 2)
+
+            records.append({
+                "type": "Feature",
+                "properties": {
+                    "field_id": field_id,
+                    "mukey": str(row.mukey),
+                    "musym": row.musym,
+                    "muname": row.muname,
+                    "drainage": text(row.drainage),
+                    "hydgrp": text(row.hydgrp),
+                    "slope_pct": num(row.slope_pct),
+                    "awc_050": num(row.awc_050),
+                    "wt_depth_cm": num(row.wt_depth_cm),
+                    "flood_freq": text(row.flood_freq),
+                },
+                "geometry": row.geometry.__geo_interface__,
+            })
+
+        coverage = None
+        if not clipped.empty:
+            field_area = gpd.GeoSeries([geometry], crs=4326).to_crs(32616).area.iloc[0]
+            soil_area = clipped.to_crs(32616).union_all().area
+            if field_area:
+                coverage = round(100.0 * soil_area / field_area, 2)
+
+        symbols = sorted({r["properties"]["musym"] for r in records
+                          if r["properties"]["musym"]})
+        return {
+            "type": "FeatureCollection",
+            "field_id": field_id,
+            "n_features": len(records),
+            "map_units": symbols,
+            "coverage_pct": coverage,
+            "features": records,
+        }
+
     def soils_geojson(self) -> dict:
         if self.cfg.soil_cache.exists():
             return json.loads(self.cfg.soil_cache.read_text(encoding="utf-8"))
